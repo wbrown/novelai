@@ -9,17 +9,18 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/wbrown/llmapi"
 )
 
-// StreamCallback is called for each token during streaming.
-// text contains the new token(s), done indicates if streaming is complete.
-type StreamCallback func(text string, done bool)
+// StreamCallback is an alias for llmapi.StreamCallback for backwards compatibility.
+type StreamCallback = llmapi.StreamCallback
 
 // SendStreaming sends a message with real-time token streaming via SSE.
 // The callback is invoked for each token received.
 //
 // Returns the same values as Send, but the callback receives tokens as they arrive.
-func (c *Conversation) SendStreaming(text string, callback StreamCallback) (
+func (c *Conversation) SendStreaming(text string, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
 	inputTokens int,
@@ -33,9 +34,11 @@ func (c *Conversation) SendStreaming(text string, callback StreamCallback) (
 	// Add user message if provided
 	if text != "" {
 		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
-	} else if len(c.Messages) > 0 && c.Messages[len(c.Messages)-1].Role != "assistant" {
-		return "", "", 0, 0, fmt.Errorf("cannot continue conversation: last message is not from assistant")
+	} else if len(c.Messages) == 0 {
+		return "", "", 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
 	}
+	// Note: If text is empty and last message is "user", we generate a response to it.
+	// If text is empty and last message is "assistant", we continue from that message.
 
 	// Build prompt string from system + conversation history
 	prompt := c.buildPrompt()
@@ -192,7 +195,7 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 
 // SendStreamingUntilDone combines streaming with automatic continuation.
 // It streams tokens via callback and continues until stopReason != "max_tokens".
-func (c *Conversation) SendStreamingUntilDone(text string, callback StreamCallback) (
+func (c *Conversation) SendStreamingUntilDone(text string, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
 	inputTokens int,

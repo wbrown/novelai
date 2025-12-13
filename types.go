@@ -33,7 +33,7 @@ var DefaultSettings = Settings{
 	MaxTokens:     2048,
 	Temperature:   1.0,
 	StopSequences: []string{"<|user|>", "<|system|>"},
-	Thinking:      true, // Enable thinking by default
+	Thinking:      false, // Disable thinking by default for faster responses
 }
 
 // Message represents a single message in a conversation.

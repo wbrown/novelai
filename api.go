@@ -9,7 +9,12 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/wbrown/llmapi"
 )
+
+// Compile-time interface check
+var _ llmapi.Conversation = (*Conversation)(nil)
 
 // API endpoint for NovelAI's OpenAI-compatible completions.
 const completionsURL = "https://text.novelai.net/oa/v1/completions"
@@ -75,10 +80,12 @@ func (c *Conversation) Send(text string) (
 	// Add user message if provided
 	if text != "" {
 		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
-	} else if len(c.Messages) > 0 && c.Messages[len(c.Messages)-1].Role != "assistant" {
-		// Can't continue if last message isn't from assistant
-		return "", "", 0, 0, fmt.Errorf("cannot continue conversation: last message is not from assistant")
+	} else if len(c.Messages) == 0 {
+		// Can't generate with no messages
+		return "", "", 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
 	}
+	// Note: If text is empty and last message is "user", we generate a response to it.
+	// If text is empty and last message is "assistant", we continue from that message.
 
 	// Build prompt string from system + conversation history
 	prompt := c.buildPrompt()
@@ -323,13 +330,22 @@ func (c *Conversation) AddMessage(role, content string) {
 }
 
 // GetMessages returns the current conversation history.
-func (c *Conversation) GetMessages() []Message {
-	return c.Messages
+// Converts internal Message type to llmapi.Message for interface compliance.
+func (c *Conversation) GetMessages() []llmapi.Message {
+	result := make([]llmapi.Message, len(c.Messages))
+	for i, m := range c.Messages {
+		result[i] = llmapi.Message{Role: m.Role, Content: m.Content}
+	}
+	return result
 }
 
 // GetUsage returns cumulative token usage for this conversation.
-func (c *Conversation) GetUsage() Usage {
-	return c.Usage
+// Converts internal Usage type to llmapi.Usage for interface compliance.
+func (c *Conversation) GetUsage() llmapi.Usage {
+	return llmapi.Usage{
+		InputTokens:  c.Usage.InputTokens,
+		OutputTokens: c.Usage.OutputTokens,
+	}
 }
 
 // GetSystem returns the system prompt.
@@ -348,9 +364,34 @@ func (c *Conversation) SetModel(model string) {
 	c.Settings.Model = model
 }
 
-// init loads the API token from environment variable.
+// init loads the API token from environment variable or token files.
+// Priority: NAI_API_KEY env var > ~/.naitoken > ./.naitoken
 func init() {
+	// 1. Environment variable (highest priority)
 	if token := os.Getenv("NAI_API_KEY"); token != "" {
 		DefaultApiToken = token
+		return
 	}
+
+	// 2. Home directory token file
+	if home, err := os.UserHomeDir(); err == nil {
+		if token := readTokenFile(home + "/.naitoken"); token != "" {
+			DefaultApiToken = token
+			return
+		}
+	}
+
+	// 3. Current directory token file
+	if token := readTokenFile(".naitoken"); token != "" {
+		DefaultApiToken = token
+	}
+}
+
+// readTokenFile reads a token from a file, returning empty string on error.
+func readTokenFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
