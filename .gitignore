@@ -1,0 +1,17 @@
+# API tokens - never commit
+.naitoken
+*.token
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test binaries
+*.test
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db

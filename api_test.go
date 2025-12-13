@@ -1,0 +1,301 @@
+package novelai
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+// mockCompletionResponse creates a mock OpenAI-compatible completions response
+func mockCompletionResponse(text, finishReason string, promptTokens, completionTokens int) completionResponse {
+	return completionResponse{
+		ID:      "cmpl-123",
+		Object:  "text_completion",
+		Created: 1677652288,
+		Model:   "glm-4-6",
+		Choices: []struct {
+			Index        int    `json:"index"`
+			Text         string `json:"text"`
+			FinishReason string `json:"finish_reason"`
+		}{
+			{
+				Index:        0,
+				Text:         text,
+				FinishReason: finishReason,
+			},
+		},
+		Usage: struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		}{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
+	}
+}
+
+func TestNewConversation(t *testing.T) {
+	system := "You are a helpful assistant."
+	conv := NewConversation(system)
+
+	if conv.System != system {
+		t.Errorf("Expected system prompt %q, got %q", system, conv.System)
+	}
+
+	if len(conv.Messages) != 0 {
+		t.Errorf("Expected empty messages, got %d", len(conv.Messages))
+	}
+
+	if conv.Settings.Model != DefaultSettings.Model {
+		t.Errorf("Expected model %q, got %q", DefaultSettings.Model, conv.Settings.Model)
+	}
+
+	if conv.HttpClient == nil {
+		t.Error("Expected HttpClient to be initialized")
+	}
+}
+
+func TestSend(t *testing.T) {
+	// Create mock server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		if r.Method != "POST" {
+			t.Errorf("Expected POST, got %s", r.Method)
+		}
+
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("Expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
+		}
+
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Errorf("Expected Authorization header with test-token")
+		}
+
+		// Parse request body
+		var req completionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request: %v", err)
+		}
+
+		// Verify request structure - should have a prompt string
+		if req.Prompt == "" {
+			t.Errorf("Expected non-empty prompt")
+		}
+
+		// Return mock response
+		resp := mockCompletionResponse(" Hello! How can I help you?", "stop", 10, 8)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	// Create conversation pointing to mock server
+	conv := NewConversation("You are helpful.")
+	conv.ApiToken = "test-token"
+
+	// Use a custom transport to redirect to our test server
+	conv.HttpClient = &http.Client{
+		Transport: &redirectTransport{server.URL},
+	}
+
+	reply, stopReason, inToks, outToks, err := conv.Send("Hello!")
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if reply != " Hello! How can I help you?" {
+		t.Errorf("Unexpected reply: %q", reply)
+	}
+
+	if stopReason != "end_turn" {
+		t.Errorf("Expected stop reason 'end_turn', got %q", stopReason)
+	}
+
+	if inToks != 10 {
+		t.Errorf("Expected 10 input tokens, got %d", inToks)
+	}
+
+	if outToks != 8 {
+		t.Errorf("Expected 8 output tokens, got %d", outToks)
+	}
+
+	// Verify message was added to history
+	if len(conv.Messages) != 2 {
+		t.Errorf("Expected 2 messages in history, got %d", len(conv.Messages))
+	}
+
+	if conv.Messages[0].Role != "user" {
+		t.Errorf("Expected first message to be user, got %s", conv.Messages[0].Role)
+	}
+
+	if conv.Messages[1].Role != "assistant" {
+		t.Errorf("Expected second message to be assistant, got %s", conv.Messages[1].Role)
+	}
+}
+
+func TestNormalizeStopReason(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"stop", "end_turn"},
+		{"length", "max_tokens"},
+		{"tool_calls", "tool_use"},
+		{"unknown", "unknown"},
+		{"", ""},
+	}
+
+	for _, tc := range tests {
+		result := normalizeStopReason(tc.input)
+		if result != tc.expected {
+			t.Errorf("normalizeStopReason(%q) = %q, expected %q", tc.input, result, tc.expected)
+		}
+	}
+}
+
+func TestAddMessage(t *testing.T) {
+	conv := NewConversation("System")
+
+	conv.AddMessage("user", "Hello")
+	conv.AddMessage("assistant", "Hi there!")
+
+	if len(conv.Messages) != 2 {
+		t.Errorf("Expected 2 messages, got %d", len(conv.Messages))
+	}
+
+	if conv.Messages[0].Content != "Hello" {
+		t.Errorf("Expected first message 'Hello', got %q", conv.Messages[0].Content)
+	}
+
+	if conv.Messages[1].Content != "Hi there!" {
+		t.Errorf("Expected second message 'Hi there!', got %q", conv.Messages[1].Content)
+	}
+}
+
+func TestGetters(t *testing.T) {
+	conv := NewConversation("Test system")
+	conv.AddMessage("user", "Test")
+	conv.Usage.InputTokens = 100
+	conv.Usage.OutputTokens = 50
+
+	if conv.GetSystem() != "Test system" {
+		t.Errorf("GetSystem() = %q, expected 'Test system'", conv.GetSystem())
+	}
+
+	msgs := conv.GetMessages()
+	if len(msgs) != 1 {
+		t.Errorf("GetMessages() returned %d messages, expected 1", len(msgs))
+	}
+
+	usage := conv.GetUsage()
+	if usage.InputTokens != 100 || usage.OutputTokens != 50 {
+		t.Errorf("GetUsage() = %+v, expected {100, 50}", usage)
+	}
+}
+
+func TestClear(t *testing.T) {
+	conv := NewConversation("System")
+	conv.AddMessage("user", "Hello")
+	conv.AddMessage("assistant", "Hi")
+	conv.Usage.InputTokens = 100
+	conv.Usage.OutputTokens = 50
+
+	conv.Clear()
+
+	if len(conv.Messages) != 0 {
+		t.Errorf("Expected empty messages after Clear, got %d", len(conv.Messages))
+	}
+
+	if conv.Usage.InputTokens != 0 || conv.Usage.OutputTokens != 0 {
+		t.Errorf("Expected zero usage after Clear, got %+v", conv.Usage)
+	}
+
+	// System should be preserved
+	if conv.System != "System" {
+		t.Errorf("Expected system prompt to be preserved, got %q", conv.System)
+	}
+}
+
+func TestMergeIfLastTwoAssistant(t *testing.T) {
+	conv := NewConversation("System")
+
+	// Add user message then two assistant messages
+	conv.AddMessage("user", "Hello")
+	conv.AddMessage("assistant", "First part")
+	conv.AddMessage("assistant", "second part")
+
+	conv.MergeIfLastTwoAssistant()
+
+	if len(conv.Messages) != 2 {
+		t.Errorf("Expected 2 messages after merge, got %d", len(conv.Messages))
+	}
+
+	expected := "First partsecond part"
+	if conv.Messages[1].Content != expected {
+		t.Errorf("Expected merged content %q, got %q", expected, conv.Messages[1].Content)
+	}
+}
+
+func TestMergeIfLastTwoAssistant_NoMerge(t *testing.T) {
+	conv := NewConversation("System")
+
+	// User, assistant, user - should not merge
+	conv.AddMessage("user", "Hello")
+	conv.AddMessage("assistant", "Hi")
+	conv.AddMessage("user", "How are you?")
+
+	conv.MergeIfLastTwoAssistant()
+
+	if len(conv.Messages) != 3 {
+		t.Errorf("Expected 3 messages (no merge), got %d", len(conv.Messages))
+	}
+}
+
+func TestSetModel(t *testing.T) {
+	conv := NewConversation("System")
+
+	conv.SetModel("llama-3-erato-v1")
+
+	if conv.Settings.Model != "llama-3-erato-v1" {
+		t.Errorf("Expected model 'llama-3-erato-v1', got %q", conv.Settings.Model)
+	}
+}
+
+func TestSendWithoutToken(t *testing.T) {
+	conv := NewConversation("System")
+	conv.ApiToken = ""
+
+	_, _, _, _, err := conv.Send("Hello")
+	if err == nil {
+		t.Error("Expected error when API token is not set")
+	}
+}
+
+func TestSendContinueWithoutAssistant(t *testing.T) {
+	conv := NewConversation("System")
+	conv.ApiToken = "test"
+	conv.AddMessage("user", "Hello")
+
+	_, _, _, _, err := conv.Send("")
+	if err == nil {
+		t.Error("Expected error when continuing without last assistant message")
+	}
+}
+
+// redirectTransport redirects all requests to a test server
+type redirectTransport struct {
+	targetURL string
+}
+
+func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Create new request to test server
+	newReq, err := http.NewRequest(req.Method, t.targetURL, req.Body)
+	if err != nil {
+		return nil, err
+	}
+	newReq.Header = req.Header
+	return http.DefaultTransport.RoundTrip(newReq)
+}
