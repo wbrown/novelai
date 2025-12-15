@@ -299,3 +299,4 @@ func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	newReq.Header = req.Header
 	return http.DefaultTransport.RoundTrip(newReq)
 }
+

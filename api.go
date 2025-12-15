@@ -66,7 +66,7 @@ func NewConversation(system string) *Conversation {
 //   - inputTokens: Tokens used for this request's input
 //   - outputTokens: Tokens generated in this response
 //   - err: Any error that occurred
-func (c *Conversation) Send(text string) (
+func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	reply string,
 	stopReason string,
 	inputTokens int,
@@ -90,13 +90,27 @@ func (c *Conversation) Send(text string) (
 	// Build prompt string from system + conversation history
 	prompt := c.buildPrompt()
 
+	// Use sampling overrides if provided, otherwise use conversation defaults
+	temperature := c.Settings.Temperature
+	if sampling.Temperature != 0 {
+		temperature = sampling.Temperature
+	}
+	topP := c.Settings.TopP
+	if sampling.TopP != 0 {
+		topP = sampling.TopP
+	}
+	topK := c.Settings.TopK
+	if sampling.TopK != 0 {
+		topK = sampling.TopK
+	}
+
 	req := completionRequest{
 		Model:             c.Settings.Model,
 		Prompt:            prompt,
 		MaxTokens:         c.Settings.MaxTokens,
-		Temperature:       c.Settings.Temperature,
-		TopP:              c.Settings.TopP,
-		TopK:              c.Settings.TopK,
+		Temperature:       temperature,
+		TopP:              topP,
+		TopK:              topK,
 		MinP:              c.Settings.MinP,
 		FrequencyPenalty:  c.Settings.FrequencyPenalty,
 		PresencePenalty:   c.Settings.PresencePenalty,
@@ -263,7 +277,7 @@ func normalizeStopReason(reason string) string {
 
 // SendUntilDone repeatedly calls Send until stopReason != "max_tokens".
 // Returns the complete accumulated output.
-func (c *Conversation) SendUntilDone(text string) (
+func (c *Conversation) SendUntilDone(text string, sampling llmapi.Sampling) (
 	reply string,
 	stopReason string,
 	inputTokens int,
@@ -277,7 +291,7 @@ func (c *Conversation) SendUntilDone(text string) (
 		var partReply string
 		var inToks, outToks int
 
-		partReply, stopReason, inToks, outToks, err = c.Send(input)
+		partReply, stopReason, inToks, outToks, err = c.Send(input, sampling)
 		if err != nil {
 			return totalReply, stopReason, inputTokens, outputTokens, err
 		}

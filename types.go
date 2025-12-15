@@ -32,6 +32,7 @@ var DefaultSettings = Settings{
 	Model:         "glm-4-6",
 	MaxTokens:     2048,
 	Temperature:   1.0,
+	TopP:          0.9,
 	StopSequences: []string{"<|user|>", "<|system|>"},
 	Thinking:      false, // Disable thinking by default for faster responses
 }

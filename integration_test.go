@@ -204,3 +204,4 @@ func TestRealAPI_StreamingNoThinking(t *testing.T) {
 		t.Error("Expected no <think> block when thinking is disabled in streaming")
 	}
 }
+

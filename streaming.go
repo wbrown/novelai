@@ -18,9 +18,10 @@ type StreamCallback = llmapi.StreamCallback
 
 // SendStreaming sends a message with real-time token streaming via SSE.
 // The callback is invoked for each token received.
+// Sampling parameters override conversation defaults for this call only.
 //
 // Returns the same values as Send, but the callback receives tokens as they arrive.
-func (c *Conversation) SendStreaming(text string, callback llmapi.StreamCallback) (
+func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
 	inputTokens int,
@@ -43,13 +44,27 @@ func (c *Conversation) SendStreaming(text string, callback llmapi.StreamCallback
 	// Build prompt string from system + conversation history
 	prompt := c.buildPrompt()
 
+	// Use sampling overrides if provided, otherwise use conversation defaults
+	temperature := c.Settings.Temperature
+	if sampling.Temperature != 0 {
+		temperature = sampling.Temperature
+	}
+	topP := c.Settings.TopP
+	if sampling.TopP != 0 {
+		topP = sampling.TopP
+	}
+	topK := c.Settings.TopK
+	if sampling.TopK != 0 {
+		topK = sampling.TopK
+	}
+
 	req := completionRequest{
 		Model:             c.Settings.Model,
 		Prompt:            prompt,
 		MaxTokens:         c.Settings.MaxTokens,
-		Temperature:       c.Settings.Temperature,
-		TopP:              c.Settings.TopP,
-		TopK:              c.Settings.TopK,
+		Temperature:       temperature,
+		TopP:              topP,
+		TopK:              topK,
 		MinP:              c.Settings.MinP,
 		FrequencyPenalty:  c.Settings.FrequencyPenalty,
 		PresencePenalty:   c.Settings.PresencePenalty,
@@ -195,7 +210,8 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 
 // SendStreamingUntilDone combines streaming with automatic continuation.
 // It streams tokens via callback and continues until stopReason != "max_tokens".
-func (c *Conversation) SendStreamingUntilDone(text string, callback llmapi.StreamCallback) (
+// Sampling parameters override conversation defaults for this call only.
+func (c *Conversation) SendStreamingUntilDone(text string, sampling llmapi.Sampling, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
 	inputTokens int,
@@ -209,7 +225,7 @@ func (c *Conversation) SendStreamingUntilDone(text string, callback llmapi.Strea
 		var partReply string
 		var inToks, outToks int
 
-		partReply, stopReason, inToks, outToks, err = c.SendStreaming(input, callback)
+		partReply, stopReason, inToks, outToks, err = c.SendStreaming(input, sampling, callback)
 		if err != nil {
 			return totalReply.String(), stopReason, inputTokens, outputTokens, err
 		}
