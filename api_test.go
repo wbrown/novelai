@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/wbrown/llmapi"
 )
 
 // mockCompletionResponse creates a mock OpenAI-compatible completions response
@@ -101,7 +103,7 @@ func TestSend(t *testing.T) {
 		Transport: &redirectTransport{server.URL},
 	}
 
-	reply, stopReason, inToks, outToks, err := conv.Send("Hello!")
+	reply, stopReason, inToks, outToks, err := conv.Send("Hello!", llmapi.Sampling{})
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -268,7 +270,7 @@ func TestSendWithoutToken(t *testing.T) {
 	conv := NewConversation("System")
 	conv.ApiToken = ""
 
-	_, _, _, _, err := conv.Send("Hello")
+	_, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 	if err == nil {
 		t.Error("Expected error when API token is not set")
 	}
@@ -279,7 +281,7 @@ func TestSendContinueWithoutAssistant(t *testing.T) {
 	conv.ApiToken = "test"
 	conv.AddMessage("user", "Hello")
 
-	_, _, _, _, err := conv.Send("")
+	_, _, _, _, err := conv.Send("", llmapi.Sampling{})
 	if err == nil {
 		t.Error("Expected error when continuing without last assistant message")
 	}
