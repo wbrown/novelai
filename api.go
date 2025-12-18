@@ -29,6 +29,15 @@ var (
 	retryDelay = 3 * time.Second
 )
 
+// GLM special tokens for conversation structure
+const (
+	glmPrefix    = "[gMASK]<sop>"
+	glmSystem    = "<|system|>"
+	glmUser      = "<|user|>"
+	glmAssistant = "<|assistant|>"
+	glmNoThink   = "/nothink"
+)
+
 // Conversation manages a chat session with NovelAI.
 type Conversation struct {
 	// System is the system prompt for the conversation.
@@ -43,6 +52,8 @@ type Conversation struct {
 	Settings Settings
 	// HttpClient is used for API requests.
 	HttpClient *http.Client
+	// Tools stores tool definitions (not used by NovelAI API, but stored for interface compliance).
+	Tools []llmapi.ToolDefinition
 }
 
 // NewConversation creates a new conversation with the given system prompt.
@@ -194,15 +205,6 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	return reply, stopReason, inputTokens, outputTokens, nil
 }
 
-// GLM special tokens for conversation structure
-const (
-	glmPrefix    = "[gMASK]<sop>"
-	glmSystem    = "<|system|>"
-	glmUser      = "<|user|>"
-	glmAssistant = "<|assistant|>"
-	glmNoThink   = "/nothink"
-)
-
 // buildPrompt constructs a prompt string from the system prompt and conversation history.
 // Uses GLM-4's special token format: [gMASK]<sop><|system|>...<|user|>...<|assistant|>
 // When Settings.Thinking is false, appends /nothink to disable extended thinking.
@@ -348,7 +350,7 @@ func (c *Conversation) AddMessage(role, content string) {
 func (c *Conversation) GetMessages() []llmapi.Message {
 	result := make([]llmapi.Message, len(c.Messages))
 	for i, m := range c.Messages {
-		result[i] = llmapi.Message{Role: m.Role, Content: m.Content}
+		result[i] = llmapi.Message{Role: llmapi.Role(m.Role), Content: m.Content}
 	}
 	return result
 }
@@ -408,4 +410,133 @@ func readTokenFile(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// ==========================================================================
+// Rich Content Methods
+// ==========================================================================
+
+// SendRich sends a message with rich content blocks and returns a full response.
+// NovelAI doesn't support rich content natively, so this extracts text from
+// content blocks and delegates to Send.
+//
+// If content is nil or empty, continues from the last message.
+func (c *Conversation) SendRich(content []llmapi.ContentBlock, sampling llmapi.Sampling) (*llmapi.RichResponse, error) {
+	// Extract text from content blocks
+	text := extractTextFromBlocks(content)
+
+	reply, stopReason, inputTokens, outputTokens, err := c.Send(text, sampling)
+	if err != nil {
+		return nil, err
+	}
+
+	return &llmapi.RichResponse{
+		Content: []llmapi.ContentBlock{
+			llmapi.NewTextBlock(reply),
+		},
+		StopReason:   stopReason,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+	}, nil
+}
+
+// SendRichStreaming sends rich content with streaming.
+// NovelAI doesn't support rich content natively, so this extracts text and
+// delegates to SendStreaming.
+func (c *Conversation) SendRichStreaming(content []llmapi.ContentBlock, sampling llmapi.Sampling, callback llmapi.StreamCallback) (*llmapi.RichResponse, error) {
+	// Extract text from content blocks
+	text := extractTextFromBlocks(content)
+
+	reply, stopReason, inputTokens, outputTokens, err := c.SendStreaming(text, sampling, callback)
+	if err != nil {
+		return nil, err
+	}
+
+	return &llmapi.RichResponse{
+		Content: []llmapi.ContentBlock{
+			llmapi.NewTextBlock(reply),
+		},
+		StopReason:   stopReason,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+	}, nil
+}
+
+// AddRichMessage adds a message with multiple content blocks to the history.
+// NovelAI doesn't support rich content, so this extracts text and adds a
+// simple message.
+func (c *Conversation) AddRichMessage(role string, content []llmapi.ContentBlock) {
+	text := extractTextFromBlocks(content)
+	c.Messages = append(c.Messages, Message{Role: role, Content: text})
+}
+
+// GetRichMessages returns the conversation history with full content blocks.
+// Since NovelAI uses simple text messages, each message is wrapped in a
+// single text content block.
+func (c *Conversation) GetRichMessages() []llmapi.RichMessage {
+	result := make([]llmapi.RichMessage, len(c.Messages))
+	for i, msg := range c.Messages {
+		result[i] = llmapi.RichMessage{
+			Role: llmapi.Role(msg.Role),
+			Content: []llmapi.ContentBlock{
+				llmapi.NewTextBlock(msg.Content),
+			},
+		}
+	}
+	return result
+}
+
+// extractTextFromBlocks extracts text content from content blocks.
+// For blocks with thinking content, it wraps them in <thinking> tags.
+func extractTextFromBlocks(blocks []llmapi.ContentBlock) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+
+	var text strings.Builder
+	for _, block := range blocks {
+		switch block.Type {
+		case llmapi.ContentTypeText:
+			text.WriteString(block.Text)
+		case llmapi.ContentTypeThinking:
+			if block.Thinking != nil {
+				text.WriteString("<thinking>\n")
+				text.WriteString(block.Thinking.Thinking)
+				text.WriteString("\n</thinking>\n")
+			}
+		}
+	}
+	return text.String()
+}
+
+// ==========================================================================
+// Tool Methods
+// ==========================================================================
+
+// SetTools configures the available tools for this conversation.
+// NovelAI doesn't support tool use, so this is stored but not used in API calls.
+func (c *Conversation) SetTools(tools []llmapi.ToolDefinition) {
+	c.Tools = tools
+}
+
+// GetTools returns the currently configured tools.
+func (c *Conversation) GetTools() []llmapi.ToolDefinition {
+	return c.Tools
+}
+
+// ==========================================================================
+// Capabilities
+// ==========================================================================
+
+// GetCapabilities returns NovelAI's supported features.
+func (c *Conversation) GetCapabilities() llmapi.Capabilities {
+	return llmapi.Capabilities{
+		SupportsImages:      false,
+		SupportsDocuments:   false,
+		SupportsToolUse:     false,
+		SupportsThinking:    true, // GLM-4 supports <think> blocks
+		SupportsStreaming:   true,
+		MaxImageSize:        0,
+		SupportedImageTypes: nil,
+	}
 }
