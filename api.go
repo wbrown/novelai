@@ -500,9 +500,9 @@ func extractTextFromBlocks(blocks []llmapi.ContentBlock) string {
 			text.WriteString(block.Text)
 		case llmapi.ContentTypeThinking:
 			if block.Thinking != nil {
-				text.WriteString("<thinking>\n")
+				text.WriteString("<think>\n")
 				text.WriteString(block.Thinking.Thinking)
-				text.WriteString("\n</thinking>\n")
+				text.WriteString("\n</think>\n")
 			}
 		}
 	}
