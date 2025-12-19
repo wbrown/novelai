@@ -341,8 +341,8 @@ func (c *Conversation) MergeIfLastTwoAssistant() {
 }
 
 // AddMessage manually adds a message to the conversation history.
-func (c *Conversation) AddMessage(role, content string) {
-	c.Messages = append(c.Messages, Message{Role: role, Content: content})
+func (c *Conversation) AddMessage(role llmapi.Role, content string) {
+	c.Messages = append(c.Messages, Message{Role: string(role), Content: content})
 }
 
 // GetMessages returns the current conversation history.
@@ -465,9 +465,9 @@ func (c *Conversation) SendRichStreaming(content []llmapi.ContentBlock, sampling
 // AddRichMessage adds a message with multiple content blocks to the history.
 // NovelAI doesn't support rich content, so this extracts text and adds a
 // simple message.
-func (c *Conversation) AddRichMessage(role string, content []llmapi.ContentBlock) {
+func (c *Conversation) AddRichMessage(role llmapi.Role, content []llmapi.ContentBlock) {
 	text := extractTextFromBlocks(content)
-	c.Messages = append(c.Messages, Message{Role: role, Content: text})
+	c.Messages = append(c.Messages, Message{Role: string(role), Content: text})
 }
 
 // GetRichMessages returns the conversation history with full content blocks.

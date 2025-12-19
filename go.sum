@@ -2,3 +2,5 @@ github.com/wbrown/anthropic v1.0.1 h1:znF0GDYwzJqLYBXn2cDpsT0uHJWsHIfnCsgW4p7yNX
 github.com/wbrown/anthropic v1.0.1/go.mod h1:pSUTk+8avflqxY27EYwTyJEVMTpRBamOMEx7IGYyuOg=
 github.com/wbrown/llmapi v0.0.0-20251215004004-c8b1c3a2c688 h1:xjMaAoK9C1QE8LApe9uEL2F98LAlGUCIv3XV7xAytBU=
 github.com/wbrown/llmapi v0.0.0-20251215004004-c8b1c3a2c688/go.mod h1:Xfi3YTGRYZ/OuDWSFDPSW8vmIMgG1P0p4pmlggqOIos=
+github.com/wbrown/llmapi v0.0.0-20251218233740-8d989a624e5e h1:z+oRdSnSJsILEqzF++XkObbT0aR59djOIl6DB5k4Xho=
+github.com/wbrown/llmapi v0.0.0-20251218233740-8d989a624e5e/go.mod h1:Xfi3YTGRYZ/OuDWSFDPSW8vmIMgG1P0p4pmlggqOIos=

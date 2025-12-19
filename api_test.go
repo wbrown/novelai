@@ -161,8 +161,8 @@ func TestNormalizeStopReason(t *testing.T) {
 func TestAddMessage(t *testing.T) {
 	conv := NewConversation("System")
 
-	conv.AddMessage("user", "Hello")
-	conv.AddMessage("assistant", "Hi there!")
+	conv.AddMessage(llmapi.RoleUser, "Hello")
+	conv.AddMessage(llmapi.RoleAssistant, "Hi there!")
 
 	if len(conv.Messages) != 2 {
 		t.Errorf("Expected 2 messages, got %d", len(conv.Messages))
@@ -179,7 +179,7 @@ func TestAddMessage(t *testing.T) {
 
 func TestGetters(t *testing.T) {
 	conv := NewConversation("Test system")
-	conv.AddMessage("user", "Test")
+	conv.AddMessage(llmapi.RoleUser, "Test")
 	conv.Usage.InputTokens = 100
 	conv.Usage.OutputTokens = 50
 
@@ -200,8 +200,8 @@ func TestGetters(t *testing.T) {
 
 func TestClear(t *testing.T) {
 	conv := NewConversation("System")
-	conv.AddMessage("user", "Hello")
-	conv.AddMessage("assistant", "Hi")
+	conv.AddMessage(llmapi.RoleUser, "Hello")
+	conv.AddMessage(llmapi.RoleAssistant, "Hi")
 	conv.Usage.InputTokens = 100
 	conv.Usage.OutputTokens = 50
 
@@ -225,9 +225,9 @@ func TestMergeIfLastTwoAssistant(t *testing.T) {
 	conv := NewConversation("System")
 
 	// Add user message then two assistant messages
-	conv.AddMessage("user", "Hello")
-	conv.AddMessage("assistant", "First part")
-	conv.AddMessage("assistant", "second part")
+	conv.AddMessage(llmapi.RoleUser, "Hello")
+	conv.AddMessage(llmapi.RoleAssistant, "First part")
+	conv.AddMessage(llmapi.RoleAssistant, "second part")
 
 	conv.MergeIfLastTwoAssistant()
 
@@ -245,9 +245,9 @@ func TestMergeIfLastTwoAssistant_NoMerge(t *testing.T) {
 	conv := NewConversation("System")
 
 	// User, assistant, user - should not merge
-	conv.AddMessage("user", "Hello")
-	conv.AddMessage("assistant", "Hi")
-	conv.AddMessage("user", "How are you?")
+	conv.AddMessage(llmapi.RoleUser, "Hello")
+	conv.AddMessage(llmapi.RoleAssistant, "Hi")
+	conv.AddMessage(llmapi.RoleUser, "How are you?")
 
 	conv.MergeIfLastTwoAssistant()
 
@@ -279,7 +279,7 @@ func TestSendWithoutToken(t *testing.T) {
 func TestSendContinueWithoutAssistant(t *testing.T) {
 	conv := NewConversation("System")
 	conv.ApiToken = "test"
-	conv.AddMessage("user", "Hello")
+	conv.AddMessage(llmapi.RoleUser, "Hello")
 
 	_, _, _, _, err := conv.Send("", llmapi.Sampling{})
 	if err == nil {
