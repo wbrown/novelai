@@ -2,6 +2,7 @@ package novelai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +41,9 @@ const (
 
 // Conversation manages a chat session with NovelAI.
 type Conversation struct {
+	// Ctx is the context for cancellation and timeouts.
+	// If nil, context.Background() is used.
+	Ctx context.Context
 	// System is the system prompt for the conversation.
 	System string
 	// Messages is the conversation history.
@@ -54,6 +58,14 @@ type Conversation struct {
 	HttpClient *http.Client
 	// Tools stores tool definitions (not used by NovelAI API, but stored for interface compliance).
 	Tools []llmapi.ToolDefinition
+}
+
+// context returns the conversation's context, defaulting to Background if nil.
+func (c *Conversation) context() context.Context {
+	if c.Ctx != nil {
+		return c.Ctx
+	}
+	return context.Background()
 }
 
 // NewConversation creates a new conversation with the given system prompt.
@@ -136,7 +148,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	}
 
 	// Create HTTP request
-	httpReq, err := http.NewRequest("POST", completionsURL, bytes.NewBuffer(jsonData))
+	httpReq, err := http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", "", 0, 0, fmt.Errorf("error creating request: %w", err)
 	}
@@ -154,7 +166,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 		if attempt < retries {
 			time.Sleep(retryDelay)
 			// Recreate request body for retry
-			httpReq, _ = http.NewRequest("POST", completionsURL, bytes.NewBuffer(jsonData))
+			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
 		}
@@ -373,6 +385,13 @@ func (c *Conversation) GetSystem() string {
 func (c *Conversation) Clear() {
 	c.Messages = make([]Message, 0)
 	c.Usage = Usage{}
+}
+
+// SetContext sets the context for cancellation and timeouts.
+// The context applies to all subsequent API calls until changed.
+// Pass nil to clear the context (will use context.Background()).
+func (c *Conversation) SetContext(ctx context.Context) {
+	c.Ctx = ctx
 }
 
 // SetModel changes the model for subsequent API calls.
