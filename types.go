@@ -1,5 +1,43 @@
 package novelai
 
+// ThinkFormat defines the prompt format for controlling thinking mode.
+// Different model versions use different conventions for enabling/disabling
+// extended thinking (<think> blocks).
+type ThinkFormat struct {
+	// UserSuffix is appended to the last user message when thinking is disabled.
+	// Example: "/nothink"
+	UserSuffix string
+
+	// AssistantPrefix is prepended to the assistant response when thinking is disabled.
+	// This "prefills" the response to skip the thinking phase.
+	// Example: "<think></think>\n" (GLM-4.6) or "</think>" (GLM-4.7)
+	AssistantPrefix string
+}
+
+// Predefined think formats for different model versions.
+var (
+	// ThinkFormatGLM46 is the format for GLM-4.6 models.
+	// Disables thinking by appending /nothink and prefilling empty think block.
+	ThinkFormatGLM46 = ThinkFormat{
+		UserSuffix:      "/nothink",
+		AssistantPrefix: "</think>\n",
+	}
+
+	// ThinkFormatGLM47 is the format for GLM-4.7 models.
+	// Disables thinking by appending /nothink and prefilling bare closing tag.
+	ThinkFormatGLM47 = ThinkFormat{
+		UserSuffix:      "/nothink",
+		AssistantPrefix: "</think>",
+	}
+
+	// ThinkFormatNone disables think formatting entirely.
+	// Use this for models that don't support thinking mode.
+	ThinkFormatNone = ThinkFormat{
+		UserSuffix:      "",
+		AssistantPrefix: "",
+	}
+)
+
 // Settings configures generation parameters for NovelAI.
 type Settings struct {
 	// Model to use for generation (e.g., "glm-4-6", "llama-3-erato-v1")
@@ -23,8 +61,12 @@ type Settings struct {
 	// StopSequences are strings that stop generation.
 	StopSequences []string
 	// Thinking enables GLM's extended thinking mode (<think> blocks).
-	// When false, appends /nothink to disable reasoning output.
+	// When false, uses ThinkFormat to disable reasoning output.
 	Thinking bool
+	// ThinkFormat specifies the prompt format for disabling thinking mode.
+	// Different model versions require different formats.
+	// If nil, defaults to ThinkFormatGLM46 for backwards compatibility.
+	ThinkFormat *ThinkFormat
 }
 
 // DefaultSettings provides reasonable defaults for NovelAI GLM-4.
@@ -34,7 +76,8 @@ var DefaultSettings = Settings{
 	Temperature:   1.0,
 	TopP:          0.9,
 	StopSequences: []string{"<|user|>", "<|system|>"},
-	Thinking:      false, // Disable thinking by default for faster responses
+	Thinking:      false,             // Disable thinking by default for faster responses
+	ThinkFormat:   &ThinkFormatGLM46, // Default to GLM-4.6 format
 }
 
 // Message represents a single message in a conversation.
