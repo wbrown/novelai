@@ -18,7 +18,8 @@ import (
 var _ llmapi.Conversation = (*Conversation)(nil)
 
 // API endpoint for NovelAI's OpenAI-compatible completions.
-const completionsURL = "https://text.novelai.net/oa/v1/completions"
+// This is the default endpoint; it can be overridden per-conversation via SetEndpoint.
+var DefaultCompletionsURL = "https://staging-text.novelai.net/oa/v1/completions"
 
 // DefaultApiToken is set from NAI_API_KEY environment variable during init().
 // It can be overridden by setting it directly or per-conversation.
@@ -58,6 +59,9 @@ type Conversation struct {
 	HttpClient *http.Client
 	// Tools stores tool definitions (not used by NovelAI API, but stored for interface compliance).
 	Tools []llmapi.ToolDefinition
+	// Endpoint overrides the default API endpoint URL.
+	// If empty, DefaultCompletionsURL is used.
+	Endpoint string
 }
 
 // context returns the conversation's context, defaulting to Background if nil.
@@ -148,7 +152,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	}
 
 	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
+	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", "", 0, 0, fmt.Errorf("error creating request: %w", err)
 	}
@@ -166,7 +170,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 		if attempt < retries {
 			time.Sleep(retryDelay)
 			// Recreate request body for retry
-			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
+			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
 		}
@@ -397,6 +401,21 @@ func (c *Conversation) SetContext(ctx context.Context) {
 // SetModel changes the model for subsequent API calls.
 func (c *Conversation) SetModel(model string) {
 	c.Settings.Model = model
+}
+
+// SetEndpoint overrides the API endpoint URL for this conversation.
+// Pass empty string to revert to DefaultCompletionsURL.
+func (c *Conversation) SetEndpoint(endpoint string) {
+	c.Endpoint = endpoint
+}
+
+// endpoint returns the effective API endpoint URL.
+// Returns Endpoint if set, otherwise DefaultCompletionsURL.
+func (c *Conversation) endpoint() string {
+	if c.Endpoint != "" {
+		return c.Endpoint
+	}
+	return DefaultCompletionsURL
 }
 
 // init loads the API token from environment variable or token files.

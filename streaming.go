@@ -78,7 +78,7 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 		return "", "", 0, 0, fmt.Errorf("error marshaling request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
+	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", "", 0, 0, fmt.Errorf("error creating request: %w", err)
 	}
@@ -102,7 +102,7 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 		}
 		if attempt < retries {
 			time.Sleep(retryDelay)
-			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
+			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
 			httpReq.Header.Set("Accept", "text/event-stream")

@@ -450,6 +450,59 @@ func TestContextCancellationTinyTimeout(t *testing.T) {
 	}
 }
 
+// TestEndpointOverride tests the endpoint override functionality.
+func TestEndpointOverride(t *testing.T) {
+	conv := NewConversation("System")
+
+	// Default should use DefaultCompletionsURL
+	if conv.endpoint() != DefaultCompletionsURL {
+		t.Errorf("Expected default endpoint %q, got %q", DefaultCompletionsURL, conv.endpoint())
+	}
+
+	// Set custom endpoint
+	customEndpoint := "https://custom.api.example.com/v1/completions"
+	conv.SetEndpoint(customEndpoint)
+
+	if conv.Endpoint != customEndpoint {
+		t.Errorf("Expected Endpoint field to be %q, got %q", customEndpoint, conv.Endpoint)
+	}
+
+	if conv.endpoint() != customEndpoint {
+		t.Errorf("Expected endpoint() to return %q, got %q", customEndpoint, conv.endpoint())
+	}
+
+	// Clear endpoint should revert to default
+	conv.SetEndpoint("")
+	if conv.endpoint() != DefaultCompletionsURL {
+		t.Errorf("Expected endpoint to revert to default, got %q", conv.endpoint())
+	}
+}
+
+// TestEndpointOverrideWithMockServer tests that endpoint override works with actual HTTP requests.
+func TestEndpointOverrideWithMockServer(t *testing.T) {
+	// Create mock server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return mock response
+		resp := mockCompletionResponse("Hello from custom endpoint!", "stop", 10, 5)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	conv := NewConversation("System")
+	conv.ApiToken = "test-token"
+	conv.SetEndpoint(server.URL)
+
+	reply, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if reply != "Hello from custom endpoint!" {
+		t.Errorf("Expected reply from custom endpoint, got %q", reply)
+	}
+}
+
 // TestContextCancellationMidStream tests cancelling a real streaming request
 // mid-generation. This is an integration test that requires valid API credentials.
 func TestContextCancellationMidStream(t *testing.T) {
