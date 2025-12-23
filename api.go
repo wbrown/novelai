@@ -37,7 +37,6 @@ const (
 	glmSystem    = "<|system|>"
 	glmUser      = "<|user|>"
 	glmAssistant = "<|assistant|>"
-	glmNoThink   = "/nothink"
 )
 
 // Conversation manages a chat session with NovelAI.
@@ -223,9 +222,10 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 
 // buildPrompt constructs a prompt string from the system prompt and conversation history.
 // Uses GLM-4's special token format: [gMASK]<sop><|system|>...<|user|>...<|assistant|>
-// When Settings.Thinking is false, appends /nothink to disable extended thinking.
+// When Settings.Thinking is false, applies ThinkFormat to disable extended thinking.
 func (c *Conversation) buildPrompt() string {
 	var b strings.Builder
+	tf := c.thinkFormat()
 
 	// Start with GLM prefix
 	b.WriteString(glmPrefix)
@@ -247,9 +247,9 @@ func (c *Conversation) buildPrompt() string {
 			b.WriteString(glmUser)
 			b.WriteString("\n")
 			b.WriteString(msg.Content)
-			// Append /nothink to last user message if thinking is disabled
-			if isLastMessage && !c.Settings.Thinking {
-				b.WriteString(glmNoThink)
+			// Append user suffix (e.g., /nothink) to last user message if thinking is disabled
+			if isLastMessage && !c.Settings.Thinking && tf.UserSuffix != "" {
+				b.WriteString(tf.UserSuffix)
 			}
 			b.WriteString("\n")
 		case "assistant":
@@ -270,9 +270,9 @@ func (c *Conversation) buildPrompt() string {
 	b.WriteString(glmAssistant)
 	b.WriteString("\n")
 
-	// If thinking is disabled, prefill with empty think block
-	if !c.Settings.Thinking {
-		b.WriteString("<think></think>\n")
+	// If thinking is disabled, prefill with assistant prefix (e.g., </think> or <think></think>)
+	if !c.Settings.Thinking && tf.AssistantPrefix != "" {
+		b.WriteString(tf.AssistantPrefix)
 	}
 
 	return b.String()
@@ -416,6 +416,22 @@ func (c *Conversation) endpoint() string {
 		return c.Endpoint
 	}
 	return DefaultCompletionsURL
+}
+
+// thinkFormat returns the effective ThinkFormat for this conversation.
+// Returns Settings.ThinkFormat if set, otherwise ThinkFormatGLM46 for backwards compatibility.
+func (c *Conversation) thinkFormat() *ThinkFormat {
+	if c.Settings.ThinkFormat != nil {
+		return c.Settings.ThinkFormat
+	}
+	return &ThinkFormatGLM46
+}
+
+// SetThinkFormat sets the think format for this conversation.
+// Use predefined formats like ThinkFormatGLM46 or ThinkFormatGLM47,
+// or create a custom ThinkFormat for other models.
+func (c *Conversation) SetThinkFormat(format *ThinkFormat) {
+	c.Settings.ThinkFormat = format
 }
 
 // init loads the API token from environment variable or token files.

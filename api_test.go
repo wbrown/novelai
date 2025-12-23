@@ -556,3 +556,149 @@ func TestContextCancellationMidStream(t *testing.T) {
 	t.Logf("Successfully cancelled after receiving %d tokens", tokensReceived)
 }
 
+// TestThinkFormatTypes tests the predefined ThinkFormat types.
+func TestThinkFormatTypes(t *testing.T) {
+	// Test GLM-4.6 format
+	if ThinkFormatGLM46.UserSuffix != "/nothink" {
+		t.Errorf("Expected GLM46 UserSuffix '/nothink', got %q", ThinkFormatGLM46.UserSuffix)
+	}
+	if ThinkFormatGLM46.AssistantPrefix != "<think></think>\n" {
+		t.Errorf("Expected GLM46 AssistantPrefix '<think></think>\\n', got %q", ThinkFormatGLM46.AssistantPrefix)
+	}
+
+	// Test GLM-4.7 format
+	if ThinkFormatGLM47.UserSuffix != "/nothink" {
+		t.Errorf("Expected GLM47 UserSuffix '/nothink', got %q", ThinkFormatGLM47.UserSuffix)
+	}
+	if ThinkFormatGLM47.AssistantPrefix != "</think>" {
+		t.Errorf("Expected GLM47 AssistantPrefix '</think>', got %q", ThinkFormatGLM47.AssistantPrefix)
+	}
+
+	// Test None format
+	if ThinkFormatNone.UserSuffix != "" {
+		t.Errorf("Expected None UserSuffix '', got %q", ThinkFormatNone.UserSuffix)
+	}
+	if ThinkFormatNone.AssistantPrefix != "" {
+		t.Errorf("Expected None AssistantPrefix '', got %q", ThinkFormatNone.AssistantPrefix)
+	}
+}
+
+// TestSetThinkFormat tests setting custom think formats.
+func TestSetThinkFormat(t *testing.T) {
+	conv := NewConversation("System")
+
+	// Default should be GLM46
+	tf := conv.thinkFormat()
+	if tf.AssistantPrefix != ThinkFormatGLM46.AssistantPrefix {
+		t.Errorf("Expected default to be GLM46 format")
+	}
+
+	// Set to GLM47
+	conv.SetThinkFormat(&ThinkFormatGLM47)
+	tf = conv.thinkFormat()
+	if tf.AssistantPrefix != "</think>" {
+		t.Errorf("Expected GLM47 AssistantPrefix '</think>', got %q", tf.AssistantPrefix)
+	}
+
+	// Set to None
+	conv.SetThinkFormat(&ThinkFormatNone)
+	tf = conv.thinkFormat()
+	if tf.AssistantPrefix != "" {
+		t.Errorf("Expected None AssistantPrefix '', got %q", tf.AssistantPrefix)
+	}
+
+	// Set to custom
+	customFormat := &ThinkFormat{
+		UserSuffix:      "/custom",
+		AssistantPrefix: "<custom/>",
+	}
+	conv.SetThinkFormat(customFormat)
+	tf = conv.thinkFormat()
+	if tf.UserSuffix != "/custom" || tf.AssistantPrefix != "<custom/>" {
+		t.Errorf("Expected custom format, got %+v", tf)
+	}
+}
+
+// TestBuildPromptWithThinkFormats tests buildPrompt with different think formats.
+func TestBuildPromptWithThinkFormats(t *testing.T) {
+	tests := []struct {
+		name            string
+		format          *ThinkFormat
+		thinking        bool
+		expectSuffix    string
+		expectPrefix    string
+		notExpectSuffix string
+		notExpectPrefix string
+	}{
+		{
+			name:         "GLM46 thinking disabled",
+			format:       &ThinkFormatGLM46,
+			thinking:     false,
+			expectSuffix: "/nothink",
+			expectPrefix: "<think></think>\n",
+		},
+		{
+			name:            "GLM46 thinking enabled",
+			format:          &ThinkFormatGLM46,
+			thinking:        true,
+			notExpectSuffix: "/nothink",
+			notExpectPrefix: "<think></think>",
+		},
+		{
+			name:         "GLM47 thinking disabled",
+			format:       &ThinkFormatGLM47,
+			thinking:     false,
+			expectSuffix: "/nothink",
+			expectPrefix: "</think>",
+		},
+		{
+			name:            "GLM47 thinking enabled",
+			format:          &ThinkFormatGLM47,
+			thinking:        true,
+			notExpectSuffix: "/nothink",
+			notExpectPrefix: "</think>",
+		},
+		{
+			name:            "None format thinking disabled",
+			format:          &ThinkFormatNone,
+			thinking:        false,
+			notExpectSuffix: "/nothink",
+			notExpectPrefix: "</think>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conv := NewConversation("System prompt")
+			conv.Settings.Thinking = tc.thinking
+			conv.SetThinkFormat(tc.format)
+			conv.AddMessage(llmapi.RoleUser, "Hello")
+
+			prompt := conv.buildPrompt()
+
+			if tc.expectSuffix != "" && !strings.Contains(prompt, tc.expectSuffix) {
+				t.Errorf("Expected prompt to contain %q, got:\n%s", tc.expectSuffix, prompt)
+			}
+			if tc.expectPrefix != "" && !strings.Contains(prompt, tc.expectPrefix) {
+				t.Errorf("Expected prompt to contain %q, got:\n%s", tc.expectPrefix, prompt)
+			}
+			if tc.notExpectSuffix != "" && strings.Contains(prompt, tc.notExpectSuffix) {
+				t.Errorf("Expected prompt NOT to contain %q, got:\n%s", tc.notExpectSuffix, prompt)
+			}
+			if tc.notExpectPrefix != "" && strings.Contains(prompt, tc.notExpectPrefix) {
+				t.Errorf("Expected prompt NOT to contain %q, got:\n%s", tc.notExpectPrefix, prompt)
+			}
+		})
+	}
+}
+
+// TestDefaultSettingsThinkFormat tests that DefaultSettings includes ThinkFormat.
+func TestDefaultSettingsThinkFormat(t *testing.T) {
+	if DefaultSettings.ThinkFormat == nil {
+		t.Error("Expected DefaultSettings.ThinkFormat to not be nil")
+	}
+	if DefaultSettings.ThinkFormat != &ThinkFormatGLM46 {
+		t.Error("Expected DefaultSettings.ThinkFormat to be ThinkFormatGLM46")
+	}
+}
+
