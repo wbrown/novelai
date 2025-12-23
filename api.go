@@ -18,7 +18,8 @@ import (
 var _ llmapi.Conversation = (*Conversation)(nil)
 
 // API endpoint for NovelAI's OpenAI-compatible completions.
-const completionsURL = "https://text.novelai.net/oa/v1/completions"
+// This is the default endpoint; it can be overridden per-conversation via SetEndpoint.
+var DefaultCompletionsURL = "https://staging-text.novelai.net/oa/v1/completions"
 
 // DefaultApiToken is set from NAI_API_KEY environment variable during init().
 // It can be overridden by setting it directly or per-conversation.
@@ -36,7 +37,6 @@ const (
 	glmSystem    = "<|system|>"
 	glmUser      = "<|user|>"
 	glmAssistant = "<|assistant|>"
-	glmNoThink   = "/nothink"
 )
 
 // Conversation manages a chat session with NovelAI.
@@ -58,6 +58,9 @@ type Conversation struct {
 	HttpClient *http.Client
 	// Tools stores tool definitions (not used by NovelAI API, but stored for interface compliance).
 	Tools []llmapi.ToolDefinition
+	// Endpoint overrides the default API endpoint URL.
+	// If empty, DefaultCompletionsURL is used.
+	Endpoint string
 }
 
 // context returns the conversation's context, defaulting to Background if nil.
@@ -148,7 +151,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	}
 
 	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
+	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", "", 0, 0, fmt.Errorf("error creating request: %w", err)
 	}
@@ -166,7 +169,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 		if attempt < retries {
 			time.Sleep(retryDelay)
 			// Recreate request body for retry
-			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", completionsURL, bytes.NewBuffer(jsonData))
+			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
 		}
@@ -219,9 +222,10 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 
 // buildPrompt constructs a prompt string from the system prompt and conversation history.
 // Uses GLM-4's special token format: [gMASK]<sop><|system|>...<|user|>...<|assistant|>
-// When Settings.Thinking is false, appends /nothink to disable extended thinking.
+// When Settings.Thinking is false, applies ThinkFormat to disable extended thinking.
 func (c *Conversation) buildPrompt() string {
 	var b strings.Builder
+	tf := c.thinkFormat()
 
 	// Start with GLM prefix
 	b.WriteString(glmPrefix)
@@ -243,9 +247,9 @@ func (c *Conversation) buildPrompt() string {
 			b.WriteString(glmUser)
 			b.WriteString("\n")
 			b.WriteString(msg.Content)
-			// Append /nothink to last user message if thinking is disabled
-			if isLastMessage && !c.Settings.Thinking {
-				b.WriteString(glmNoThink)
+			// Append user suffix (e.g., /nothink) to last user message if thinking is disabled
+			if isLastMessage && !c.Settings.Thinking && tf.UserSuffix != "" {
+				b.WriteString(tf.UserSuffix)
 			}
 			b.WriteString("\n")
 		case "assistant":
@@ -266,9 +270,9 @@ func (c *Conversation) buildPrompt() string {
 	b.WriteString(glmAssistant)
 	b.WriteString("\n")
 
-	// If thinking is disabled, prefill with empty think block
-	if !c.Settings.Thinking {
-		b.WriteString("<think></think>\n")
+	// If thinking is disabled, prefill with assistant prefix (e.g., </think> or <think></think>)
+	if !c.Settings.Thinking && tf.AssistantPrefix != "" {
+		b.WriteString(tf.AssistantPrefix)
 	}
 
 	return b.String()
@@ -397,6 +401,37 @@ func (c *Conversation) SetContext(ctx context.Context) {
 // SetModel changes the model for subsequent API calls.
 func (c *Conversation) SetModel(model string) {
 	c.Settings.Model = model
+}
+
+// SetEndpoint overrides the API endpoint URL for this conversation.
+// Pass empty string to revert to DefaultCompletionsURL.
+func (c *Conversation) SetEndpoint(endpoint string) {
+	c.Endpoint = endpoint
+}
+
+// endpoint returns the effective API endpoint URL.
+// Returns Endpoint if set, otherwise DefaultCompletionsURL.
+func (c *Conversation) endpoint() string {
+	if c.Endpoint != "" {
+		return c.Endpoint
+	}
+	return DefaultCompletionsURL
+}
+
+// thinkFormat returns the effective ThinkFormat for this conversation.
+// Returns Settings.ThinkFormat if set, otherwise ThinkFormatGLM46 for backwards compatibility.
+func (c *Conversation) thinkFormat() *ThinkFormat {
+	if c.Settings.ThinkFormat != nil {
+		return c.Settings.ThinkFormat
+	}
+	return &ThinkFormatGLM46
+}
+
+// SetThinkFormat sets the think format for this conversation.
+// Use predefined formats like ThinkFormatGLM46 or ThinkFormatGLM47,
+// or create a custom ThinkFormat for other models.
+func (c *Conversation) SetThinkFormat(format *ThinkFormat) {
+	c.Settings.ThinkFormat = format
 }
 
 // init loads the API token from environment variable or token files.
