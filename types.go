@@ -94,20 +94,26 @@ type Usage struct {
 	OutputTokens int
 }
 
+// streamOptions controls streaming behavior options.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 // completionRequest is the OpenAI-compatible completions request format for NovelAI.
 type completionRequest struct {
-	Model             string   `json:"model"`
-	Prompt            string   `json:"prompt"`
-	MaxTokens         int      `json:"max_tokens,omitempty"`
-	Temperature       float64  `json:"temperature,omitempty"`
-	TopP              float64  `json:"top_p,omitempty"`
-	TopK              int      `json:"top_k,omitempty"`
-	MinP              float64  `json:"min_p,omitempty"`
-	FrequencyPenalty  float64  `json:"frequency_penalty,omitempty"`
-	PresencePenalty   float64  `json:"presence_penalty,omitempty"`
-	RepetitionPenalty float64  `json:"repetition_penalty,omitempty"`
-	Stream            bool     `json:"stream,omitempty"`
-	Stop              []string `json:"stop,omitempty"`
+	Model             string         `json:"model"`
+	Prompt            string         `json:"prompt"`
+	MaxTokens         int            `json:"max_tokens,omitempty"`
+	Temperature       float64        `json:"temperature,omitempty"`
+	TopP              float64        `json:"top_p,omitempty"`
+	TopK              int            `json:"top_k,omitempty"`
+	MinP              float64        `json:"min_p,omitempty"`
+	FrequencyPenalty  float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty   float64        `json:"presence_penalty,omitempty"`
+	RepetitionPenalty float64        `json:"repetition_penalty,omitempty"`
+	Stream            bool           `json:"stream,omitempty"`
+	StreamOptions     *streamOptions `json:"stream_options,omitempty"`
+	Stop              []string       `json:"stop,omitempty"`
 }
 
 // completionResponse is the OpenAI-compatible completions response format from NovelAI.
@@ -139,4 +145,9 @@ type streamChunk struct {
 		Text         string  `json:"text"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
 }

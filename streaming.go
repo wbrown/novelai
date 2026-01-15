@@ -21,22 +21,25 @@ type StreamCallback = llmapi.StreamCallback
 // Sampling parameters override conversation defaults for this call only.
 //
 // Returns the same values as Send, but the callback receives tokens as they arrive.
+// cacheCreationTokens and cacheReadTokens are always 0 (NovelAI doesn't report cache stats).
 func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
 	inputTokens int,
 	outputTokens int,
+	cacheCreationTokens int,
+	cacheReadTokens int,
 	err error,
 ) {
 	if c.ApiToken == "" {
-		return "", "", 0, 0, fmt.Errorf("API token not set")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("API token not set")
 	}
 
 	// Add user message if provided
 	if text != "" {
 		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
 	} else if len(c.Messages) == 0 {
-		return "", "", 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
 	}
 	// Note: If text is empty and last message is "user", we generate a response to it.
 	// If text is empty and last message is "assistant", we continue from that message.
@@ -70,17 +73,18 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 		PresencePenalty:   c.Settings.PresencePenalty,
 		RepetitionPenalty: c.Settings.RepetitionPenalty,
 		Stop:              c.Settings.StopSequences,
-		Stream:            true, // Enable streaming
+		Stream:            true,
+		StreamOptions:     &streamOptions{IncludeUsage: true},
 	}
 
 	jsonData, err := json.Marshal(req)
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("error marshaling request: %w", err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("error marshaling request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("error creating request: %w", err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("error creating request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -109,22 +113,22 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 		}
 	}
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
 	}
 	if resp == nil {
-		return "", "", 0, 0, fmt.Errorf("HTTP response is nil")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP response is nil")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", "", 0, 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
 	}
 
 	// Parse SSE stream
-	reply, stopReason, err = c.parseSSEStream(resp.Body, callback)
+	reply, stopReason, inputTokens, outputTokens, err = c.parseSSEStream(resp.Body, callback)
 	if err != nil {
-		return reply, stopReason, 0, 0, err
+		return reply, stopReason, 0, 0, 0, 0, err
 	}
 
 	// Add assistant message to history
@@ -133,28 +137,24 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 	// Normalize stop reason
 	stopReason = normalizeStopReason(stopReason)
 
-	// Note: Streaming responses may not include token counts in all implementations.
-	// We estimate based on a rough 4 chars per token approximation.
-	// Real token counts would need to be fetched from a separate endpoint or
-	// accumulated from chunk metadata if provided.
-	outputTokens = len(reply) / 4
-	if outputTokens == 0 && len(reply) > 0 {
-		outputTokens = 1
-	}
-
+	// Update cumulative usage
+	c.Usage.InputTokens += inputTokens
 	c.Usage.OutputTokens += outputTokens
 
-	return reply, stopReason, inputTokens, outputTokens, nil
+	return reply, stopReason, inputTokens, outputTokens, 0, 0, nil
 }
 
 // parseSSEStream reads Server-Sent Events and calls the callback for each token.
 func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 	fullText string,
 	stopReason string,
+	inputTokens int,
+	outputTokens int,
 	err error,
 ) {
 	scanner := bufio.NewScanner(body)
 	var accumulated strings.Builder
+	var tokenCount int
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -190,6 +190,7 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 		// Extract text (completions format uses "text" not "delta.content")
 		if choice.Text != "" {
 			accumulated.WriteString(choice.Text)
+			tokenCount++ // Count each chunk as a token
 			if callback != nil {
 				callback(choice.Text, false)
 			}
@@ -199,23 +200,37 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			stopReason = *choice.FinishReason
 		}
+
+		// Capture usage data if API provides it (may override our count)
+		if chunk.Usage != nil {
+			inputTokens = chunk.Usage.PromptTokens
+			outputTokens = chunk.Usage.CompletionTokens
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return accumulated.String(), stopReason, fmt.Errorf("error reading stream: %w", err)
+		return accumulated.String(), stopReason, inputTokens, outputTokens, fmt.Errorf("error reading stream: %w", err)
 	}
 
-	return accumulated.String(), stopReason, nil
+	// Use our counted tokens if API didn't provide usage data
+	if outputTokens == 0 {
+		outputTokens = tokenCount
+	}
+
+	return accumulated.String(), stopReason, inputTokens, outputTokens, nil
 }
 
 // SendStreamingUntilDone combines streaming with automatic continuation.
 // It streams tokens via callback and continues until stopReason != "max_tokens".
 // Sampling parameters override conversation defaults for this call only.
+// cacheCreationTokens and cacheReadTokens are always 0 (NovelAI doesn't report cache stats).
 func (c *Conversation) SendStreamingUntilDone(text string, sampling llmapi.Sampling, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
 	inputTokens int,
 	outputTokens int,
+	cacheCreationTokens int,
+	cacheReadTokens int,
 	err error,
 ) {
 	var totalReply strings.Builder
@@ -225,9 +240,9 @@ func (c *Conversation) SendStreamingUntilDone(text string, sampling llmapi.Sampl
 		var partReply string
 		var inToks, outToks int
 
-		partReply, stopReason, inToks, outToks, err = c.SendStreaming(input, sampling, callback)
+		partReply, stopReason, inToks, outToks, _, _, err = c.SendStreaming(input, sampling, callback)
 		if err != nil {
-			return totalReply.String(), stopReason, inputTokens, outputTokens, err
+			return totalReply.String(), stopReason, inputTokens, outputTokens, 0, 0, err
 		}
 
 		totalReply.WriteString(partReply)
@@ -243,5 +258,5 @@ func (c *Conversation) SendStreamingUntilDone(text string, sampling llmapi.Sampl
 		input = ""
 	}
 
-	return totalReply.String(), stopReason, inputTokens, outputTokens, nil
+	return totalReply.String(), stopReason, inputTokens, outputTokens, 0, 0, nil
 }

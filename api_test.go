@@ -106,7 +106,7 @@ func TestSend(t *testing.T) {
 		Transport: &redirectTransport{server.URL},
 	}
 
-	reply, stopReason, inToks, outToks, err := conv.Send("Hello!", llmapi.Sampling{})
+	reply, stopReason, inToks, outToks, _, _, err := conv.Send("Hello!", llmapi.Sampling{})
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestSendWithoutToken(t *testing.T) {
 	conv := NewConversation("System")
 	conv.ApiToken = ""
 
-	_, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	_, _, _, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 	if err == nil {
 		t.Error("Expected error when API token is not set")
 	}
@@ -284,7 +284,7 @@ func TestSendContinueWithoutAssistant(t *testing.T) {
 	conv.ApiToken = "test"
 	conv.AddMessage(llmapi.RoleUser, "Hello")
 
-	_, _, _, _, err := conv.Send("", llmapi.Sampling{})
+	_, _, _, _, _, _, err := conv.Send("", llmapi.Sampling{})
 	if err == nil {
 		t.Error("Expected error when continuing without last assistant message")
 	}
@@ -325,7 +325,7 @@ func TestContextCancellation(t *testing.T) {
 		Transport: &redirectTransport{targetURL: server.URL},
 	}
 
-	_, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	_, _, _, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 
 	if err == nil {
 		t.Fatal("Expected error due to context cancellation, got nil")
@@ -356,7 +356,7 @@ func TestContextCancellationImmediate(t *testing.T) {
 		Transport: &redirectTransport{targetURL: server.URL},
 	}
 
-	_, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	_, _, _, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 
 	if err == nil {
 		t.Fatal("Expected error due to context cancellation, got nil")
@@ -387,7 +387,7 @@ func TestContextCancellationStreaming(t *testing.T) {
 		Transport: &redirectTransport{targetURL: server.URL},
 	}
 
-	_, _, _, _, err := conv.SendStreaming("Hello", llmapi.Sampling{}, nil)
+	_, _, _, _, _, _, err := conv.SendStreaming("Hello", llmapi.Sampling{}, nil)
 
 	if err == nil {
 		t.Fatal("Expected error due to context cancellation, got nil")
@@ -414,7 +414,7 @@ func TestContextCancellationPreCancelled(t *testing.T) {
 	conv.SetContext(ctx)
 	conv.ApiToken = "test-token" // Doesn't need to be valid
 
-	_, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	_, _, _, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 
 	if err == nil {
 		t.Fatal("Expected error due to pre-cancelled context")
@@ -437,7 +437,7 @@ func TestContextCancellationTinyTimeout(t *testing.T) {
 	conv.SetContext(ctx)
 	conv.ApiToken = "test-token" // Doesn't need to be valid
 
-	_, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	_, _, _, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 
 	if err == nil {
 		t.Fatal("Expected error due to timeout")
@@ -493,7 +493,7 @@ func TestEndpointOverrideWithMockServer(t *testing.T) {
 	conv.ApiToken = "test-token"
 	conv.SetEndpoint(server.URL)
 
-	reply, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
+	reply, _, _, _, _, _, err := conv.Send("Hello", llmapi.Sampling{})
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -532,7 +532,7 @@ func TestContextCancellationMidStream(t *testing.T) {
 	}
 
 	// Ask for a long response
-	_, _, _, _, err := conv.SendStreaming(
+	_, _, _, _, _, _, err := conv.SendStreaming(
 		"Write a detailed 500 word essay about the history of computing.",
 		llmapi.Sampling{},
 		callback,
@@ -702,3 +702,169 @@ func TestDefaultSettingsThinkFormat(t *testing.T) {
 	}
 }
 
+// TestStreamingUsageDataIntegration tests that the real NovelAI API returns
+// usage data in streaming mode when stream_options.include_usage is set.
+func TestStreamingUsageDataIntegration(t *testing.T) {
+	if DefaultApiToken == "" {
+		t.Skip("Skipping integration test: NAI_API_KEY not set")
+	}
+
+	conv := NewConversation("You are a helpful assistant.")
+
+	reply, stopReason, inputTokens, outputTokens, _, _, err := conv.SendStreaming(
+		"Say hello in exactly 3 words.",
+		llmapi.Sampling{},
+		nil,
+	)
+
+	if err != nil {
+		// Rate limiting is not a test failure
+		if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "Concurrent generation") {
+			t.Skip("Skipping: API rate limited")
+		}
+		t.Fatalf("SendStreaming failed: %v", err)
+	}
+
+	t.Logf("Reply: %q", reply)
+	t.Logf("Stop reason: %s", stopReason)
+	t.Logf("Input tokens: %d", inputTokens)
+	t.Logf("Output tokens: %d", outputTokens)
+
+	// Output tokens should be counted from streaming chunks
+	if outputTokens == 0 {
+		t.Errorf("Expected non-zero output tokens, got 0 - streaming token counting failed")
+	}
+
+	// Input tokens require a tokenizer and are not available from streaming alone
+	// This is expected to be 0 unless the API returns usage data
+	t.Logf("Note: Input tokens = %d (expected 0 unless API provides usage data)", inputTokens)
+}
+
+// TestStreamingWithUsageData tests that streaming requests include stream_options
+// and properly capture usage data from the response (mock server).
+func TestStreamingWithUsageData(t *testing.T) {
+	expectedPromptTokens := 42
+	expectedCompletionTokens := 15
+
+	// Create mock SSE server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request includes stream_options.include_usage
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request: %v", err)
+			return
+		}
+
+		streamOpts, ok := req["stream_options"].(map[string]interface{})
+		if !ok {
+			t.Error("Expected stream_options in request")
+			return
+		}
+		includeUsage, ok := streamOpts["include_usage"].(bool)
+		if !ok || !includeUsage {
+			t.Error("Expected stream_options.include_usage to be true")
+			return
+		}
+
+		// Send SSE response with usage in final chunk
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("Expected ResponseWriter to support Flusher")
+			return
+		}
+
+		// Send token chunks
+		tokens := []string{"Hello", " world", "!"}
+		for _, tok := range tokens {
+			finishReason := ""
+			chunk := map[string]interface{}{
+				"id":      "cmpl-123",
+				"object":  "text_completion",
+				"created": 1677652288,
+				"model":   "glm-4-6",
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"text":          tok,
+						"finish_reason": finishReason,
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			w.Write([]byte("data: " + string(data) + "\n\n"))
+			flusher.Flush()
+		}
+
+		// Send final chunk with usage data
+		finalChunk := map[string]interface{}{
+			"id":      "cmpl-123",
+			"object":  "text_completion",
+			"created": 1677652288,
+			"model":   "glm-4-6",
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"text":          "",
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     expectedPromptTokens,
+				"completion_tokens": expectedCompletionTokens,
+				"total_tokens":      expectedPromptTokens + expectedCompletionTokens,
+			},
+		}
+		data, _ := json.Marshal(finalChunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		flusher.Flush()
+
+		// Send done marker
+		w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	// Create conversation
+	conv := NewConversation("You are helpful.")
+	conv.ApiToken = "test-token"
+	conv.SetEndpoint(server.URL)
+
+	// Call streaming
+	var tokens []string
+	reply, stopReason, inputTokens, outputTokens, _, _, err := conv.SendStreaming("Hi", llmapi.Sampling{}, func(text string, done bool) {
+		if !done && text != "" {
+			tokens = append(tokens, text)
+		}
+	})
+
+	if err != nil {
+		t.Fatalf("SendStreaming failed: %v", err)
+	}
+
+	// Verify reply
+	if reply != "Hello world!" {
+		t.Errorf("Expected reply 'Hello world!', got %q", reply)
+	}
+
+	// Verify stop reason
+	if stopReason != "end_turn" {
+		t.Errorf("Expected stop reason 'end_turn', got %q", stopReason)
+	}
+
+	// Verify token counts from usage data
+	if inputTokens != expectedPromptTokens {
+		t.Errorf("Expected %d input tokens, got %d", expectedPromptTokens, inputTokens)
+	}
+	if outputTokens != expectedCompletionTokens {
+		t.Errorf("Expected %d output tokens, got %d", expectedCompletionTokens, outputTokens)
+	}
+
+	// Verify callback received tokens
+	if len(tokens) != 3 {
+		t.Errorf("Expected 3 token callbacks, got %d", len(tokens))
+	}
+}

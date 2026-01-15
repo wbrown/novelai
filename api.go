@@ -91,16 +91,20 @@ func NewConversation(system string) *Conversation {
 //   - stopReason: Normalized stop reason ("end_turn", "max_tokens", "stop_sequence")
 //   - inputTokens: Tokens used for this request's input
 //   - outputTokens: Tokens generated in this response
+//   - cacheCreationTokens: Always 0 (NovelAI doesn't report cache stats)
+//   - cacheReadTokens: Always 0 (NovelAI doesn't report cache stats)
 //   - err: Any error that occurred
 func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	reply string,
 	stopReason string,
 	inputTokens int,
 	outputTokens int,
+	cacheCreationTokens int,
+	cacheReadTokens int,
 	err error,
 ) {
 	if c.ApiToken == "" {
-		return "", "", 0, 0, fmt.Errorf("API token not set")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("API token not set")
 	}
 
 	// Add user message if provided
@@ -108,7 +112,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
 	} else if len(c.Messages) == 0 {
 		// Can't generate with no messages
-		return "", "", 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
 	}
 	// Note: If text is empty and last message is "user", we generate a response to it.
 	// If text is empty and last message is "assistant", we continue from that message.
@@ -147,13 +151,13 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	// Marshal request to JSON
 	jsonData, err := json.Marshal(req)
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("error marshaling request: %w", err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("error marshaling request: %w", err)
 	}
 
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("error creating request: %w", err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("error creating request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -175,31 +179,31 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 		}
 	}
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
 	}
 	if resp == nil {
-		return "", "", 0, 0, fmt.Errorf("HTTP response is nil")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP response is nil")
 	}
 	defer resp.Body.Close()
 
 	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", 0, 0, fmt.Errorf("error reading response: %w", err)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("error reading response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", 0, 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+		return "", "", 0, 0, 0, 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
 	}
 
 	// Parse response
 	var compResp completionResponse
 	if err := json.Unmarshal(body, &compResp); err != nil {
-		return string(body), "", 0, 0, fmt.Errorf("error parsing response: %w", err)
+		return string(body), "", 0, 0, 0, 0, fmt.Errorf("error parsing response: %w", err)
 	}
 
 	if len(compResp.Choices) == 0 {
-		return "", "", 0, 0, fmt.Errorf("no choices in response")
+		return "", "", 0, 0, 0, 0, fmt.Errorf("no choices in response")
 	}
 
 	choice := compResp.Choices[0]
@@ -217,7 +221,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	c.Usage.InputTokens += inputTokens
 	c.Usage.OutputTokens += outputTokens
 
-	return reply, stopReason, inputTokens, outputTokens, nil
+	return reply, stopReason, inputTokens, outputTokens, 0, 0, nil
 }
 
 // buildPrompt constructs a prompt string from the system prompt and conversation history.
@@ -300,6 +304,8 @@ func (c *Conversation) SendUntilDone(text string, sampling llmapi.Sampling) (
 	stopReason string,
 	inputTokens int,
 	outputTokens int,
+	cacheCreationTokens int,
+	cacheReadTokens int,
 	err error,
 ) {
 	var totalReply string
@@ -309,9 +315,9 @@ func (c *Conversation) SendUntilDone(text string, sampling llmapi.Sampling) (
 		var partReply string
 		var inToks, outToks int
 
-		partReply, stopReason, inToks, outToks, err = c.Send(input, sampling)
+		partReply, stopReason, inToks, outToks, _, _, err = c.Send(input, sampling)
 		if err != nil {
-			return totalReply, stopReason, inputTokens, outputTokens, err
+			return totalReply, stopReason, inputTokens, outputTokens, 0, 0, err
 		}
 
 		totalReply += partReply
@@ -329,7 +335,7 @@ func (c *Conversation) SendUntilDone(text string, sampling llmapi.Sampling) (
 		input = ""
 	}
 
-	return totalReply, stopReason, inputTokens, outputTokens, nil
+	return totalReply, stopReason, inputTokens, outputTokens, 0, 0, nil
 }
 
 // MergeIfLastTwoAssistant merges the last two assistant messages if they are
@@ -373,10 +379,13 @@ func (c *Conversation) GetMessages() []llmapi.Message {
 
 // GetUsage returns cumulative token usage for this conversation.
 // Converts internal Usage type to llmapi.Usage for interface compliance.
+// Cache token fields are always 0 (NovelAI doesn't report cache stats).
 func (c *Conversation) GetUsage() llmapi.Usage {
 	return llmapi.Usage{
-		InputTokens:  c.Usage.InputTokens,
-		OutputTokens: c.Usage.OutputTokens,
+		InputTokens:             c.Usage.InputTokens,
+		OutputTokens:            c.Usage.OutputTokens,
+		CacheCreationInputTokens: 0,
+		CacheReadInputTokens:     0,
 	}
 }
 
@@ -479,7 +488,7 @@ func (c *Conversation) SendRich(content []llmapi.ContentBlock, sampling llmapi.S
 	// Extract text from content blocks
 	text := extractTextFromBlocks(content)
 
-	reply, stopReason, inputTokens, outputTokens, err := c.Send(text, sampling)
+	reply, stopReason, inputTokens, outputTokens, _, _, err := c.Send(text, sampling)
 	if err != nil {
 		return nil, err
 	}
@@ -491,6 +500,9 @@ func (c *Conversation) SendRich(content []llmapi.ContentBlock, sampling llmapi.S
 		StopReason:   stopReason,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
+		// NovelAI doesn't report cache stats
+		CacheCreationInputTokens: 0,
+		CacheReadInputTokens:     0,
 	}, nil
 }
 
@@ -501,7 +513,7 @@ func (c *Conversation) SendRichStreaming(content []llmapi.ContentBlock, sampling
 	// Extract text from content blocks
 	text := extractTextFromBlocks(content)
 
-	reply, stopReason, inputTokens, outputTokens, err := c.SendStreaming(text, sampling, callback)
+	reply, stopReason, inputTokens, outputTokens, _, _, err := c.SendStreaming(text, sampling, callback)
 	if err != nil {
 		return nil, err
 	}
@@ -513,6 +525,9 @@ func (c *Conversation) SendRichStreaming(content []llmapi.ContentBlock, sampling
 		StopReason:   stopReason,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
+		// NovelAI doesn't report cache stats
+		CacheCreationInputTokens: 0,
+		CacheReadInputTokens:     0,
 	}, nil
 }
 
