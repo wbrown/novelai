@@ -605,7 +605,23 @@ func (c *Conversation) GetCapabilities() llmapi.Capabilities {
 		SupportsToolUse:     false,
 		SupportsThinking:    true, // GLM-4 supports <think> blocks
 		SupportsStreaming:   true,
+		SupportsCaching:     false,
 		MaxImageSize:        0,
 		SupportedImageTypes: nil,
 	}
+}
+
+// EnableSystemCaching is not supported by NovelAI.
+func (c *Conversation) EnableSystemCaching() error {
+	return fmt.Errorf("novelai: caching is not supported")
+}
+
+// EnableConversationCaching is not supported by NovelAI.
+func (c *Conversation) EnableConversationCaching() error {
+	return fmt.Errorf("novelai: caching is not supported")
+}
+
+// DisableConversationCaching is not supported by NovelAI.
+func (c *Conversation) DisableConversationCaching() error {
+	return fmt.Errorf("novelai: caching is not supported")
 }
