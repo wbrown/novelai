@@ -562,8 +562,8 @@ func TestThinkFormatTypes(t *testing.T) {
 	if ThinkFormatGLM46.UserSuffix != "/nothink" {
 		t.Errorf("Expected GLM46 UserSuffix '/nothink', got %q", ThinkFormatGLM46.UserSuffix)
 	}
-	if ThinkFormatGLM46.AssistantPrefix != "<think></think>\n" {
-		t.Errorf("Expected GLM46 AssistantPrefix '<think></think>\\n', got %q", ThinkFormatGLM46.AssistantPrefix)
+	if ThinkFormatGLM46.AssistantPrefix != "</think>\n" {
+		t.Errorf("Expected GLM46 AssistantPrefix '</think>\\n', got %q", ThinkFormatGLM46.AssistantPrefix)
 	}
 
 	// Test GLM-4.7 format
@@ -635,7 +635,7 @@ func TestBuildPromptWithThinkFormats(t *testing.T) {
 			format:       &ThinkFormatGLM46,
 			thinking:     false,
 			expectSuffix: "/nothink",
-			expectPrefix: "<think></think>\n",
+			expectPrefix: "</think>\n",
 		},
 		{
 			name:            "GLM46 thinking enabled",
