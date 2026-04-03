@@ -20,9 +20,10 @@ func mockCompletionResponse(text, finishReason string, promptTokens, completionT
 		Created: 1677652288,
 		Model:   "glm-4-6",
 		Choices: []struct {
-			Index        int    `json:"index"`
-			Text         string `json:"text"`
-			FinishReason string `json:"finish_reason"`
+			Index        int             `json:"index"`
+			Text         string          `json:"text"`
+			FinishReason string          `json:"finish_reason"`
+			Logprobs     *choiceLogprobs `json:"logprobs"`
 		}{
 			{
 				Index:        0,
@@ -866,5 +867,314 @@ func TestStreamingWithUsageData(t *testing.T) {
 	// Verify callback received tokens
 	if len(tokens) != 3 {
 		t.Errorf("Expected 3 token callbacks, got %d", len(tokens))
+	}
+}
+
+// TestLogprobsIntegration tests logprobs against the real NovelAI API.
+func TestLogprobsIntegration(t *testing.T) {
+	if DefaultApiToken == "" {
+		t.Skip("Skipping integration test: NAI_API_KEY not set")
+	}
+
+	conv := NewConversation("You are a helpful assistant. Be very brief.")
+	conv.Settings.MaxTokens = 20
+	conv.Settings.Logprobs = 5
+	conv.Settings.Thinking = false
+
+	reply, _, _, _, _, _, err := conv.Send("Say hello.", llmapi.Sampling{})
+	if err != nil {
+		if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "Concurrent generation") {
+			t.Skip("Skipping: API rate limited")
+		}
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	t.Logf("Reply: %q", reply)
+
+	lp := conv.GetLastLogprobs()
+	t.Logf("Logprob entries: %d", len(lp))
+	for i, entry := range lp {
+		t.Logf("  [%d] token=%q  %.2f%%", i, entry.Token, entry.Percent())
+		for tok, pct := range entry.TopLogprobsPercent() {
+			t.Logf("       alt %q  %.2f%%", tok, pct)
+		}
+	}
+
+	if len(lp) == 0 {
+		t.Error("Expected non-empty logprobs from API")
+	}
+}
+
+// TestLogprobsStreamingIntegration tests logprobs with streaming against the real API.
+func TestLogprobsStreamingIntegration(t *testing.T) {
+	if DefaultApiToken == "" {
+		t.Skip("Skipping integration test: NAI_API_KEY not set")
+	}
+
+	conv := NewConversation("You are a helpful assistant. Be very brief.")
+	conv.Settings.MaxTokens = 20
+	conv.Settings.Logprobs = 5
+	conv.Settings.Thinking = false
+
+	reply, _, _, _, _, _, err := conv.SendStreaming("Say hello.", llmapi.Sampling{}, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "Concurrent generation") {
+			t.Skip("Skipping: API rate limited")
+		}
+		t.Fatalf("SendStreaming failed: %v", err)
+	}
+
+	t.Logf("Reply: %q", reply)
+
+	lp := conv.GetLastLogprobs()
+	t.Logf("Logprob entries: %d", len(lp))
+	for i, entry := range lp {
+		t.Logf("  [%d] token=%q logprob=%.4f offset=%d top=%d",
+			i, entry.Token, entry.Logprob, entry.TextOffset, len(entry.TopLogprobs))
+	}
+
+	if len(lp) == 0 {
+		t.Error("Expected non-empty logprobs from streaming API")
+	}
+}
+
+// TestSendWithLogprobs tests that logprobs are requested and parsed from non-streaming responses.
+func TestSendWithLogprobs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify logprobs is in the request
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request: %v", err)
+			return
+		}
+
+		logprobs, ok := req["logprobs"].(float64)
+		if !ok || int(logprobs) != 5 {
+			t.Errorf("Expected logprobs=5 in request, got %v", req["logprobs"])
+			return
+		}
+
+		// Return response with logprobs data
+		resp := map[string]interface{}{
+			"id":      "cmpl-123",
+			"object":  "text_completion",
+			"created": 1677652288,
+			"model":   "glm-4-6",
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"text":          "Hello world",
+					"finish_reason": "stop",
+					"logprobs": map[string]interface{}{
+						"tokens":         []string{"Hello", " world"},
+						"token_logprobs": []float64{-0.5, -1.2},
+						"top_logprobs": []map[string]float64{
+							{"Hello": -0.5, "Hi": -1.0, "Hey": -2.0},
+							{" world": -1.2, " there": -1.5},
+						},
+						"text_offset": []int{0, 5},
+					},
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 2,
+				"total_tokens":      12,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	conv := NewConversation("System")
+	conv.ApiToken = "test-token"
+	conv.Settings.Logprobs = 5
+	conv.HttpClient = &http.Client{
+		Transport: &redirectTransport{server.URL},
+	}
+
+	reply, _, _, _, _, _, err := conv.Send("Hi", llmapi.Sampling{})
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if reply != "Hello world" {
+		t.Errorf("Expected reply 'Hello world', got %q", reply)
+	}
+
+	lp := conv.GetLastLogprobs()
+	if len(lp) != 2 {
+		t.Fatalf("Expected 2 logprob entries, got %d", len(lp))
+	}
+
+	if lp[0].Token != "Hello" {
+		t.Errorf("Expected first token 'Hello', got %q", lp[0].Token)
+	}
+	if lp[0].Logprob != -0.5 {
+		t.Errorf("Expected first logprob -0.5, got %f", lp[0].Logprob)
+	}
+	if lp[0].TextOffset != 0 {
+		t.Errorf("Expected first text_offset 0, got %d", lp[0].TextOffset)
+	}
+	if len(lp[0].TopLogprobs) != 3 {
+		t.Errorf("Expected 3 top logprobs for first token, got %d", len(lp[0].TopLogprobs))
+	}
+
+	if lp[1].Token != " world" {
+		t.Errorf("Expected second token ' world', got %q", lp[1].Token)
+	}
+	if lp[1].Logprob != -1.2 {
+		t.Errorf("Expected second logprob -1.2, got %f", lp[1].Logprob)
+	}
+	if lp[1].TextOffset != 5 {
+		t.Errorf("Expected second text_offset 5, got %d", lp[1].TextOffset)
+	}
+}
+
+// TestSendWithoutLogprobs verifies logprobs are not sent when disabled.
+func TestSendWithoutLogprobs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request: %v", err)
+			return
+		}
+
+		if _, ok := req["logprobs"]; ok {
+			t.Errorf("Expected logprobs to be absent from request, but it was present")
+		}
+
+		resp := mockCompletionResponse("Hi there", "stop", 10, 3)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	conv := NewConversation("System")
+	conv.ApiToken = "test-token"
+	// Logprobs defaults to 0 (disabled)
+	conv.HttpClient = &http.Client{
+		Transport: &redirectTransport{server.URL},
+	}
+
+	_, _, _, _, _, _, err := conv.Send("Hi", llmapi.Sampling{})
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	lp := conv.GetLastLogprobs()
+	if lp != nil {
+		t.Errorf("Expected nil logprobs when disabled, got %v", lp)
+	}
+}
+
+// TestStreamingWithLogprobs tests that logprobs are accumulated during streaming.
+func TestStreamingWithLogprobs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request: %v", err)
+			return
+		}
+
+		logprobs, ok := req["logprobs"].(float64)
+		if !ok || int(logprobs) != 3 {
+			t.Errorf("Expected logprobs=3 in request, got %v", req["logprobs"])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		flusher := w.(http.Flusher)
+
+		// Chunk 1: "Hello"
+		chunk1 := map[string]interface{}{
+			"id": "cmpl-1", "object": "text_completion", "created": 1, "model": "glm-4-6",
+			"choices": []map[string]interface{}{
+				{
+					"index": 0, "text": "Hello", "finish_reason": "",
+					"logprobs": map[string]interface{}{
+						"tokens":         []string{"Hello"},
+						"token_logprobs": []float64{-0.3},
+						"top_logprobs":   []map[string]float64{{"Hello": -0.3, "Hi": -1.5}},
+						"text_offset":    []int{0},
+					},
+				},
+			},
+		}
+		data, _ := json.Marshal(chunk1)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 2: " world"
+		chunk2 := map[string]interface{}{
+			"id": "cmpl-1", "object": "text_completion", "created": 1, "model": "glm-4-6",
+			"choices": []map[string]interface{}{
+				{
+					"index": 0, "text": " world", "finish_reason": "",
+					"logprobs": map[string]interface{}{
+						"tokens":         []string{" world"},
+						"token_logprobs": []float64{-0.8},
+						"top_logprobs":   []map[string]float64{{" world": -0.8, " there": -2.1}},
+						"text_offset":    []int{5},
+					},
+				},
+			},
+		}
+		data, _ = json.Marshal(chunk2)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		flusher.Flush()
+
+		// Final chunk with stop and usage
+		finalChunk := map[string]interface{}{
+			"id": "cmpl-1", "object": "text_completion", "created": 1, "model": "glm-4-6",
+			"choices": []map[string]interface{}{
+				{"index": 0, "text": "", "finish_reason": "stop"},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12,
+			},
+		}
+		data, _ = json.Marshal(finalChunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	conv := NewConversation("System")
+	conv.ApiToken = "test-token"
+	conv.Settings.Logprobs = 3
+	conv.SetEndpoint(server.URL)
+
+	reply, stopReason, _, _, _, _, err := conv.SendStreaming("Hi", llmapi.Sampling{}, nil)
+	if err != nil {
+		t.Fatalf("SendStreaming failed: %v", err)
+	}
+
+	if reply != "Hello world" {
+		t.Errorf("Expected reply 'Hello world', got %q", reply)
+	}
+	if stopReason != "end_turn" {
+		t.Errorf("Expected stop reason 'end_turn', got %q", stopReason)
+	}
+
+	lp := conv.GetLastLogprobs()
+	if len(lp) != 2 {
+		t.Fatalf("Expected 2 logprob entries from streaming, got %d", len(lp))
+	}
+
+	if lp[0].Token != "Hello" || lp[0].Logprob != -0.3 {
+		t.Errorf("First logprob: got token=%q logprob=%f, want Hello/-0.3", lp[0].Token, lp[0].Logprob)
+	}
+	if lp[1].Token != " world" || lp[1].Logprob != -0.8 {
+		t.Errorf("Second logprob: got token=%q logprob=%f, want ' world'/-0.8", lp[1].Token, lp[1].Logprob)
+	}
+
+	// Verify top logprobs are captured
+	if len(lp[0].TopLogprobs) != 2 {
+		t.Errorf("Expected 2 top logprobs for first token, got %d", len(lp[0].TopLogprobs))
 	}
 }

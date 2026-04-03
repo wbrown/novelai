@@ -77,6 +77,11 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 		StreamOptions:     &streamOptions{IncludeUsage: true},
 	}
 
+	if c.Settings.Logprobs > 0 {
+		lp := c.Settings.Logprobs
+		req.Logprobs = &lp
+	}
+
 	jsonData, err := json.Marshal(req)
 	if err != nil {
 		return "", "", 0, 0, 0, 0, fmt.Errorf("error marshaling request: %w", err)
@@ -155,6 +160,7 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 	scanner := bufio.NewScanner(body)
 	var accumulated strings.Builder
 	var tokenCount int
+	var logprobs []llmapi.TokenLogprob
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -196,6 +202,12 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 			}
 		}
 
+		// Accumulate logprobs from chunk
+		chunkLogprobs := convertChoiceLogprobs(choice.Logprobs)
+		if len(chunkLogprobs) > 0 {
+			logprobs = append(logprobs, chunkLogprobs...)
+		}
+
 		// Check for finish reason
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			stopReason = *choice.FinishReason
@@ -216,6 +228,9 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 	if outputTokens == 0 {
 		outputTokens = tokenCount
 	}
+
+	// Store accumulated logprobs
+	c.LastLogprobs = logprobs
 
 	return accumulated.String(), stopReason, inputTokens, outputTokens, nil
 }
