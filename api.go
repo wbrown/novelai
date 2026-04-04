@@ -61,6 +61,9 @@ type Conversation struct {
 	// Endpoint overrides the default API endpoint URL.
 	// If empty, DefaultCompletionsURL is used.
 	Endpoint string
+	// LastLogprobs stores per-token log probability data from the most recent API call.
+	// Only populated when Settings.Logprobs > 0.
+	LastLogprobs []llmapi.TokenLogprob
 }
 
 // context returns the conversation's context, defaulting to Background if nil.
@@ -148,6 +151,11 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 		Stop:              c.Settings.StopSequences,
 	}
 
+	if c.Settings.Logprobs > 0 {
+		lp := c.Settings.Logprobs
+		req.Logprobs = &lp
+	}
+
 	// Marshal request to JSON
 	jsonData, err := json.Marshal(req)
 	if err != nil {
@@ -211,6 +219,9 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 
 	// Add assistant message to history
 	c.Messages = append(c.Messages, Message{Role: "assistant", Content: reply})
+
+	// Extract logprobs if present
+	c.LastLogprobs = convertChoiceLogprobs(choice.Logprobs)
 
 	// Normalize stop reason from OpenAI format to common format
 	stopReason = normalizeStopReason(choice.FinishReason)
@@ -476,6 +487,40 @@ func readTokenFile(path string) string {
 }
 
 // ==========================================================================
+// Logprobs Methods
+// ==========================================================================
+
+// convertChoiceLogprobs converts the API's logprob format to the common TokenLogprob type.
+func convertChoiceLogprobs(lp *choiceLogprobs) []llmapi.TokenLogprob {
+	if lp == nil || len(lp.Tokens) == 0 {
+		return nil
+	}
+
+	result := make([]llmapi.TokenLogprob, len(lp.Tokens))
+	for i, token := range lp.Tokens {
+		result[i] = llmapi.TokenLogprob{
+			Token: token,
+		}
+		if i < len(lp.TokenLogprobs) {
+			result[i].Logprob = lp.TokenLogprobs[i]
+		}
+		if i < len(lp.TopLogprobs) {
+			result[i].TopLogprobs = lp.TopLogprobs[i]
+		}
+		if i < len(lp.TextOffset) {
+			result[i].TextOffset = lp.TextOffset[i]
+		}
+	}
+	return result
+}
+
+// GetLastLogprobs returns the per-token log probability data from the most recent API call.
+// Returns nil if logprobs were not requested (Settings.Logprobs == 0) or not returned by the API.
+func (c *Conversation) GetLastLogprobs() []llmapi.TokenLogprob {
+	return c.LastLogprobs
+}
+
+// ==========================================================================
 // Rich Content Methods
 // ==========================================================================
 
@@ -606,6 +651,7 @@ func (c *Conversation) GetCapabilities() llmapi.Capabilities {
 		SupportsThinking:    true, // GLM-4 supports <think> blocks
 		SupportsStreaming:   true,
 		SupportsCaching:     false,
+		SupportsLogprobs:    true,
 		MaxImageSize:        0,
 		SupportedImageTypes: nil,
 	}

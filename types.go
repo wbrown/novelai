@@ -60,6 +60,9 @@ type Settings struct {
 	RepetitionPenalty float64
 	// StopSequences are strings that stop generation.
 	StopSequences []string
+	// Logprobs is the number of top log probabilities to return per token.
+	// 0 disables logprobs. Valid range: 0-20.
+	Logprobs int
 	// Thinking enables GLM's extended thinking mode (<think> blocks).
 	// When false, uses ThinkFormat to disable reasoning output.
 	Thinking bool
@@ -111,9 +114,18 @@ type completionRequest struct {
 	FrequencyPenalty  float64        `json:"frequency_penalty,omitempty"`
 	PresencePenalty   float64        `json:"presence_penalty,omitempty"`
 	RepetitionPenalty float64        `json:"repetition_penalty,omitempty"`
+	Logprobs          *int           `json:"logprobs,omitempty"`
 	Stream            bool           `json:"stream,omitempty"`
 	StreamOptions     *streamOptions `json:"stream_options,omitempty"`
 	Stop              []string       `json:"stop,omitempty"`
+}
+
+// choiceLogprobs contains per-token log probability data from the API.
+type choiceLogprobs struct {
+	Tokens        []string             `json:"tokens"`
+	TokenLogprobs []float64            `json:"token_logprobs"`
+	TopLogprobs   []map[string]float64 `json:"top_logprobs"`
+	TextOffset    []int                `json:"text_offset"`
 }
 
 // completionResponse is the OpenAI-compatible completions response format from NovelAI.
@@ -123,9 +135,10 @@ type completionResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int    `json:"index"`
-		Text         string `json:"text"`
-		FinishReason string `json:"finish_reason"` // "stop", "length"
+		Index        int             `json:"index"`
+		Text         string          `json:"text"`
+		FinishReason string          `json:"finish_reason"` // "stop", "length"
+		Logprobs     *choiceLogprobs `json:"logprobs"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -141,9 +154,10 @@ type streamChunk struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int     `json:"index"`
-		Text         string  `json:"text"`
-		FinishReason *string `json:"finish_reason"`
+		Index        int             `json:"index"`
+		Text         string          `json:"text"`
+		FinishReason *string         `json:"finish_reason"`
+		Logprobs     *choiceLogprobs `json:"logprobs"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
