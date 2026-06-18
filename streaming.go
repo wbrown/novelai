@@ -45,7 +45,7 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 	// If text is empty and last message is "assistant", we continue from that message.
 
 	// Build prompt string from system + conversation history
-	prompt := c.buildPrompt()
+	prompt := c.buildPrompt(sampling.ReasoningEffort)
 
 	// Use sampling overrides if provided, otherwise use conversation defaults
 	temperature := c.Settings.Temperature
@@ -155,6 +155,109 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 	scanner := bufio.NewScanner(body)
 	var accumulated strings.Builder
 	var tokenCount int
+	var inThink bool
+
+	// emit routes one text segment by the current think state: reasoning is
+	// surfaced to the callback tagged TokenReasoning but kept out of accumulated
+	// (it is not part of the returned content); content is both accumulated and
+	// emitted as TokenContent.
+	emit := func(s string) {
+		if s == "" {
+			return
+		}
+		if inThink {
+			if callback != nil {
+				callback(llmapi.StreamDelta{Text: s, Kind: llmapi.TokenReasoning})
+			}
+		} else {
+			accumulated.WriteString(s)
+			if callback != nil {
+				callback(llmapi.StreamDelta{Text: s, Kind: llmapi.TokenContent})
+			}
+		}
+	}
+
+	// held holds fragments whose concatenation is a partial <think>/</think> marker
+	// spanning chunks; they are yielded individually (never joined) if they turn out
+	// not to be a marker.
+	var held []string
+
+	// couldStartMarker reports whether s is a non-empty prefix of a marker — i.e. it
+	// could still grow into <think> or </think>.
+	couldStartMarker := func(s string) bool {
+		return s != "" && (strings.HasPrefix("<think>", s) || strings.HasPrefix("</think>", s))
+	}
+
+	// flushHeld yields the held fragments individually under the current state.
+	flushHeld := func() {
+		for _, h := range held {
+			emit(h)
+		}
+		held = nil
+	}
+
+	// routeText routes a fragment with no pending held prefix: it emits the text
+	// around any complete markers within the fragment (flipping state and consuming
+	// them) and holds a trailing partial marker for the next chunk.
+	routeText := func(c string) {
+		for c != "" {
+			openIdx := strings.Index(c, "<think>")
+			closeIdx := strings.Index(c, "</think>")
+			switch {
+			case openIdx >= 0 && (closeIdx < 0 || openIdx < closeIdx):
+				emit(c[:openIdx])
+				inThink = true
+				c = c[openIdx+len("<think>"):]
+			case closeIdx >= 0:
+				emit(c[:closeIdx])
+				inThink = false
+				c = c[closeIdx+len("</think>"):]
+			default:
+				// No complete marker; hold the longest trailing partial marker.
+				keep := 0
+				maxK := len(c)
+				if maxK > 7 { // longest proper marker prefix is "</think" (7)
+					maxK = 7
+				}
+				for k := maxK; k >= 1; k-- {
+					if couldStartMarker(c[len(c)-k:]) {
+						keep = k
+						break
+					}
+				}
+				emit(c[:len(c)-keep])
+				if keep > 0 {
+					held = append(held, c[len(c)-keep:])
+				}
+				c = ""
+			}
+		}
+	}
+
+	// routeFragment routes one streamed fragment, reassembling a marker that may be
+	// split across this and earlier chunks.
+	routeFragment := func(c string) {
+		if len(held) > 0 {
+			combined := strings.Join(held, "") + c
+			switch {
+			case strings.HasPrefix(combined, "<think>"):
+				inThink = true
+				held = nil
+				routeText(combined[len("<think>"):])
+				return
+			case strings.HasPrefix(combined, "</think>"):
+				inThink = false
+				held = nil
+				routeText(combined[len("</think>"):])
+				return
+			case couldStartMarker(combined):
+				held = append(held, c)
+				return
+			}
+			flushHeld() // false alarm: held was not a marker — yield it individually
+		}
+		routeText(c)
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -168,8 +271,9 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 
 		// Check for stream end
 		if data == "[DONE]" {
+			flushHeld() // emit any held maybe-marker that never completed
 			if callback != nil {
-				callback("", true)
+				callback(llmapi.StreamDelta{Done: true})
 			}
 			break
 		}
@@ -187,13 +291,14 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 
 		choice := chunk.Choices[0]
 
-		// Extract text (completions format uses "text" not "delta.content")
+		// Completions format uses "text". GLM reasoning models wrap their
+		// chain-of-thought in <think>/</think> markers, but NovelAI streams at
+		// arbitrary byte boundaries, so a marker is often split across chunks.
+		// routeFragment reassembles markers across chunks, routes reasoning vs
+		// content, and yields held fragments individually if they aren't a marker.
 		if choice.Text != "" {
-			accumulated.WriteString(choice.Text)
 			tokenCount++ // Count each chunk as a token
-			if callback != nil {
-				callback(choice.Text, false)
-			}
+			routeFragment(choice.Text)
 		}
 
 		// Check for finish reason
@@ -207,6 +312,9 @@ func (c *Conversation) parseSSEStream(body io.Reader, callback StreamCallback) (
 			outputTokens = chunk.Usage.CompletionTokens
 		}
 	}
+
+	// Stream ended without [DONE]: flush any still-held maybe-marker bytes.
+	flushHeld()
 
 	if err := scanner.Err(); err != nil {
 		return accumulated.String(), stopReason, inputTokens, outputTokens, fmt.Errorf("error reading stream: %w", err)

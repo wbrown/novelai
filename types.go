@@ -60,9 +60,6 @@ type Settings struct {
 	RepetitionPenalty float64
 	// StopSequences are strings that stop generation.
 	StopSequences []string
-	// Thinking enables GLM's extended thinking mode (<think> blocks).
-	// When false, uses ThinkFormat to disable reasoning output.
-	Thinking bool
 	// ThinkFormat specifies the prompt format for disabling thinking mode.
 	// Different model versions require different formats.
 	// If nil, defaults to ThinkFormatGLM46 for backwards compatibility.
@@ -76,7 +73,6 @@ var DefaultSettings = Settings{
 	Temperature:   1.0,
 	TopP:          0.9,
 	StopSequences: []string{"<|user|>", "<|system|>"},
-	Thinking:      false,             // Disable thinking by default for faster responses
 	ThinkFormat:   &ThinkFormatGLM46, // Default to GLM-4.6 format
 }
 

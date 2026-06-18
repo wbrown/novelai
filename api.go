@@ -17,8 +17,9 @@ import (
 // Compile-time interface check
 var _ llmapi.Conversation = (*Conversation)(nil)
 
-// API endpoint for NovelAI's OpenAI-compatible completions.
-// This is the default endpoint; it can be overridden per-conversation via SetEndpoint.
+// API endpoint for NovelAI's OpenAI-compatible completions. This is the default;
+// it can be overridden by the NAI_ENDPOINT env var (in init) or per-conversation
+// via SetEndpoint.
 var DefaultCompletionsURL = "https://staging-text.novelai.net/oa/v1/completions"
 
 // DefaultApiToken is set from NAI_API_KEY environment variable during init().
@@ -118,7 +119,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	// If text is empty and last message is "assistant", we continue from that message.
 
 	// Build prompt string from system + conversation history
-	prompt := c.buildPrompt()
+	prompt := c.buildPrompt(sampling.ReasoningEffort)
 
 	// Use sampling overrides if provided, otherwise use conversation defaults
 	temperature := c.Settings.Temperature
@@ -226,8 +227,8 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 
 // buildPrompt constructs a prompt string from the system prompt and conversation history.
 // Uses GLM-4's special token format: [gMASK]<sop><|system|>...<|user|>...<|assistant|>
-// When Settings.Thinking is false, applies ThinkFormat to disable extended thinking.
-func (c *Conversation) buildPrompt() string {
+// When effort is ReasoningOff, applies ThinkFormat to disable extended thinking.
+func (c *Conversation) buildPrompt(effort llmapi.ReasoningEffort) string {
 	var b strings.Builder
 	tf := c.thinkFormat()
 
@@ -251,8 +252,8 @@ func (c *Conversation) buildPrompt() string {
 			b.WriteString(glmUser)
 			b.WriteString("\n")
 			b.WriteString(msg.Content)
-			// Append user suffix (e.g., /nothink) to last user message if thinking is disabled
-			if isLastMessage && !c.Settings.Thinking && tf.UserSuffix != "" {
+			// Append user suffix (e.g., /nothink) to last user message if reasoning is off
+			if isLastMessage && effort == llmapi.ReasoningOff && tf.UserSuffix != "" {
 				b.WriteString(tf.UserSuffix)
 			}
 			b.WriteString("\n")
@@ -274,8 +275,8 @@ func (c *Conversation) buildPrompt() string {
 	b.WriteString(glmAssistant)
 	b.WriteString("\n")
 
-	// If thinking is disabled, prefill with assistant prefix (e.g., </think> or <think></think>)
-	if !c.Settings.Thinking && tf.AssistantPrefix != "" {
+	// If reasoning is off, prefill with assistant prefix (e.g., </think> or <think></think>)
+	if effort == llmapi.ReasoningOff && tf.AssistantPrefix != "" {
 		b.WriteString(tf.AssistantPrefix)
 	}
 
@@ -382,8 +383,8 @@ func (c *Conversation) GetMessages() []llmapi.Message {
 // Cache token fields are always 0 (NovelAI doesn't report cache stats).
 func (c *Conversation) GetUsage() llmapi.Usage {
 	return llmapi.Usage{
-		InputTokens:             c.Usage.InputTokens,
-		OutputTokens:            c.Usage.OutputTokens,
+		InputTokens:              c.Usage.InputTokens,
+		OutputTokens:             c.Usage.OutputTokens,
 		CacheCreationInputTokens: 0,
 		CacheReadInputTokens:     0,
 	}
@@ -443,9 +444,15 @@ func (c *Conversation) SetThinkFormat(format *ThinkFormat) {
 	c.Settings.ThinkFormat = format
 }
 
-// init loads the API token from environment variable or token files.
-// Priority: NAI_API_KEY env var > ~/.naitoken > ./.naitoken
+// init loads the API token and optional endpoint from the environment.
+// Token priority: NAI_API_KEY env var > ~/.naitoken > ./.naitoken.
+// NAI_ENDPOINT, when set, overrides DefaultCompletionsURL.
 func init() {
+	// Endpoint override, independent of token resolution.
+	if endpoint := os.Getenv("NAI_ENDPOINT"); endpoint != "" {
+		DefaultCompletionsURL = endpoint
+	}
+
 	// 1. Environment variable (highest priority)
 	if token := os.Getenv("NAI_API_KEY"); token != "" {
 		DefaultApiToken = token
