@@ -519,8 +519,8 @@ func TestContextCancellationMidStream(t *testing.T) {
 	var cancelled bool
 
 	// Cancel after receiving some tokens
-	callback := func(text string, done bool) {
-		if done {
+	callback := func(d llmapi.StreamDelta) {
+		if d.Done {
 			return
 		}
 		tokensReceived++
@@ -670,11 +670,14 @@ func TestBuildPromptWithThinkFormats(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			conv := NewConversation("System prompt")
-			conv.Settings.Thinking = tc.thinking
 			conv.SetThinkFormat(tc.format)
 			conv.AddMessage(llmapi.RoleUser, "Hello")
 
-			prompt := conv.buildPrompt()
+			effort := llmapi.ReasoningOff
+			if tc.thinking {
+				effort = llmapi.ReasoningHigh
+			}
+			prompt := conv.buildPrompt(effort)
 
 			if tc.expectSuffix != "" && !strings.Contains(prompt, tc.expectSuffix) {
 				t.Errorf("Expected prompt to contain %q, got:\n%s", tc.expectSuffix, prompt)
@@ -738,6 +741,131 @@ func TestStreamingUsageDataIntegration(t *testing.T) {
 	// Input tokens require a tokenizer and are not available from streaming alone
 	// This is expected to be 0 unless the API returns usage data
 	t.Logf("Note: Input tokens = %d (expected 0 unless API provides usage data)", inputTokens)
+}
+
+// TestParseSSEStreamThinkSplit drives parseSSEStream with chunks split at arbitrary
+// byte boundaries — the real NovelAI wire shape, where a <think>/</think> marker is
+// fragmented across chunks (e.g. "<","thi","nk>"). The splitter must reassemble
+// markers across chunks, route the think block to TokenReasoning (kept out of the
+// returned content), and yield held fragments INDIVIDUALLY when they turn out not to
+// be a marker (never accumulate-and-dump). The expected per-delta sequence pins it.
+func TestParseSSEStreamThinkSplit(t *testing.T) {
+	chunks := []string{
+		"<", "thi", "nk>step one ", // <think> split across 3 chunks; "step one " is reasoning
+		"step two",            // reasoning
+		"</thi", "nk>answer ", // </think> split across 2 chunks; "answer " is content
+		"a<", // "a" is content; "<" is held as a maybe-marker
+		"b",  // "<b" is not a marker -> flush "<" individually, then "b"
+	}
+	var sb strings.Builder
+	for _, c := range chunks {
+		sb.WriteString(`data: {"choices":[{"text":"` + c + `"}]}` + "\n")
+	}
+	sb.WriteString(`data: {"choices":[{"text":"","finish_reason":"stop"}]}` + "\n")
+	sb.WriteString("data: [DONE]\n")
+
+	type delta struct {
+		kind llmapi.TokenKind
+		text string
+	}
+	var got []delta
+	cb := func(d llmapi.StreamDelta) {
+		if d.Done {
+			return
+		}
+		got = append(got, delta{d.Kind, d.Text})
+	}
+
+	var c Conversation
+	fullText, _, _, _, err := c.parseSSEStream(strings.NewReader(sb.String()), cb)
+	if err != nil {
+		t.Fatalf("parseSSEStream: %v", err)
+	}
+
+	want := []delta{
+		{llmapi.TokenReasoning, "step one "},
+		{llmapi.TokenReasoning, "step two"},
+		{llmapi.TokenContent, "answer "},
+		{llmapi.TokenContent, "a"},
+		{llmapi.TokenContent, "<"},
+		{llmapi.TokenContent, "b"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d deltas, want %d:\n got: %+v\n want: %+v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("delta[%d] = {kind:%d %q}, want {kind:%d %q}", i, got[i].kind, got[i].text, want[i].kind, want[i].text)
+		}
+	}
+
+	// Returned content is the content-tagged stream only, markers stripped out.
+	if fullText != "answer a<b" {
+		t.Errorf("fullText = %q, want %q", fullText, "answer a<b")
+	}
+}
+
+// TestStreamingReasoningSplit makes a live Thinking=true call to GLM-4-6 and
+// asserts the streaming splitter routes the model's <think>/</think> block to
+// TokenReasoning while keeping it out of the returned content. It is deliberately
+// NOT key-gated: the real model is the thing under test, so a missing NAI_API_KEY
+// must fail loudly, not silently skip. It also logs both streams so the exact
+// on-the-wire marker form is visible.
+func TestStreamingReasoningSplit(t *testing.T) {
+	conv := NewConversation("You are a helpful assistant.")
+	conv.Settings.MaxTokens = 1024
+
+	var reasoning, content strings.Builder
+	type obsDelta struct {
+		kind llmapi.TokenKind
+		text string
+	}
+	var deltas []obsDelta
+	cb := func(d llmapi.StreamDelta) {
+		if d.Done {
+			return
+		}
+		deltas = append(deltas, obsDelta{d.Kind, d.Text})
+		switch d.Kind {
+		case llmapi.TokenReasoning:
+			reasoning.WriteString(d.Text)
+		case llmapi.TokenContent:
+			content.WriteString(d.Text)
+		}
+	}
+
+	reply, stopReason, _, outputTokens, _, _, err := conv.SendStreaming(
+		"Is 51 a prime number? Think briefly, then answer yes or no.",
+		llmapi.Sampling{ReasoningEffort: llmapi.ReasoningHigh},
+		cb,
+	)
+	if err != nil {
+		t.Fatalf("SendStreaming: %v", err)
+	}
+
+	t.Logf("stop=%s outputTokens=%d", stopReason, outputTokens)
+	t.Logf("reasoning (%d bytes): %q", reasoning.Len(), reasoning.String())
+	t.Logf("content   (%d bytes): %q", content.Len(), reply)
+	t.Logf("--- raw deltas (how <think>/</think> chunk on the wire) ---")
+	for i, d := range deltas {
+		if i >= 28 {
+			t.Logf("  ... +%d more", len(deltas)-28)
+			break
+		}
+		t.Logf("  [%2d] kind=%d %q", i, d.kind, d.text)
+	}
+
+	if reasoning.Len() == 0 {
+		t.Errorf("no reasoning captured: the <think>/</think> markers were not split out — inspect the content log above for the real marker form")
+	}
+	if strings.Contains(reply, "<think>") || strings.Contains(reply, "</think>") {
+		t.Errorf("returned content leaked think markers: %q", reply)
+	}
+	// The returned reply is accumulated content only; it must equal the
+	// TokenContent stream (both are the content side of the split).
+	if reply != content.String() {
+		t.Errorf("returned reply %q != content-tagged stream %q", reply, content.String())
+	}
 }
 
 // TestStreamingWithUsageData tests that streaming requests include stream_options
@@ -835,9 +963,9 @@ func TestStreamingWithUsageData(t *testing.T) {
 
 	// Call streaming
 	var tokens []string
-	reply, stopReason, inputTokens, outputTokens, _, _, err := conv.SendStreaming("Hi", llmapi.Sampling{}, func(text string, done bool) {
-		if !done && text != "" {
-			tokens = append(tokens, text)
+	reply, stopReason, inputTokens, outputTokens, _, _, err := conv.SendStreaming("Hi", llmapi.Sampling{}, func(d llmapi.StreamDelta) {
+		if !d.Done && d.Text != "" {
+			tokens = append(tokens, d.Text)
 		}
 	})
 
