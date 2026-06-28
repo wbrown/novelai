@@ -105,8 +105,8 @@ type ScenarioSettings struct {
 	DefaultBias         bool              `json:"defaultBias,omitempty"`
 	Prefix              string            `json:"prefix,omitempty"`
 	DynamicPenaltyRange bool              `json:"dynamicPenaltyRange,omitempty"`
-	PrefixMode          int               `json:"prefixMode,omitempty"`
-	Mode                int               `json:"mode,omitempty"`
+	PrefixMode          int               `json:"prefixMode"`
+	Mode                int               `json:"mode"`
 	Model               string            `json:"model,omitempty"`
 }
 
@@ -167,7 +167,10 @@ type BiasGroup struct {
 // MessageSettings configures system prompt and prefill for chat models (GLM-4).
 type MessageSettings struct {
 	SystemPrompt string `json:"systemPrompt"`
-	Prefill      string `json:"prefill"`
+	// SystemPrompts holds per-model system prompts keyed by model id (e.g.
+	// "glm-4-6", "xialong-v1"); the platform selects by Settings.Model.
+	SystemPrompts map[string]string `json:"systemPrompts,omitempty"`
+	Prefill       string            `json:"prefill"`
 }
 
 // NewScenario creates a new scenario with sensible defaults for GLM-4.
@@ -223,6 +226,53 @@ func DefaultGenerationParams() *GenerationParams {
 			{ID: "top_p", Enabled: true},
 			{ID: "min_p", Enabled: false},
 		},
+	}
+}
+
+// Xialong model id and the NovelAI sampling preset id used for Xialong scenarios.
+const (
+	XialongModel  = "xialong-v1"
+	XialongPreset = "938a2a37-d362-41b7-918f-221d492afdd5"
+)
+
+// XialongGenerationParams returns the sampler settings for the Xialong preset.
+func XialongGenerationParams() *GenerationParams {
+	return &GenerationParams{
+		TextGenerationSettingsVersion: 8,
+		Temperature:                   1.7,
+		MaxLength:                     256,
+		MinLength:                     1,
+		TopK:                          4250,
+		TopP:                          0.8,
+		TopA:                          1,
+		TypicalP:                      1,
+		TailFreeSampling:              1,
+		PhraseRepPen:                  "medium",
+		MirostatLR:                    1,
+		CFGScale:                      1,
+		MinP:                          0.1,
+		Order: []SamplerOrder{
+			{ID: "temperature", Enabled: true},
+			{ID: "top_k", Enabled: true},
+			{ID: "top_p", Enabled: true},
+			{ID: "min_p", Enabled: true},
+		},
+	}
+}
+
+// XialongScenarioSettings returns the default scenario settings (model, preset,
+// and samplers) for Xialong scenarios. Callers may override before exporting.
+func XialongScenarioSettings() ScenarioSettings {
+	return ScenarioSettings{
+		Parameters:    XialongGenerationParams(),
+		Preset:        XialongPreset,
+		TrimResponses: true,
+		BanBrackets:   true,
+		DefaultBias:   true,
+		Prefix:        "vanilla",
+		PrefixMode:    0,
+		Mode:          0,
+		Model:         XialongModel,
 	}
 }
 
