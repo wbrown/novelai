@@ -141,6 +141,106 @@ func TestSend(t *testing.T) {
 	}
 }
 
+// TestWireBudgetComputation pins the wire max_tokens computation: desired
+// output (per-call Sampling.DesiredOutputTokens, else Settings.MaxTokens as
+// the default desired output) plus the effort tier's reasoning headroom —
+// think-format reasoning streams inside the same completion budget as the
+// answer, so without the reserve the thinking eats the content budget —
+// clamped to Settings.OutputCeiling, NovelAI's per-request output limit
+// (DefaultSettings carries 2048, the typical NovelAI cap; 0 = no clamp).
+// With no desired output at all the field stays omitted and the server's
+// default governs: headroom is never added to a bound the caller declined
+// to set.
+func TestWireBudgetComputation(t *testing.T) {
+	send := func(t *testing.T, mutate func(*Conversation), sampling llmapi.Sampling) int {
+		t.Helper()
+		var got int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req completionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			got = req.MaxTokens
+			resp := mockCompletionResponse(" ok", "stop", 5, 2)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}))
+		defer server.Close()
+
+		conv := NewConversation("sys")
+		conv.ApiToken = "test-token"
+		conv.HttpClient = &http.Client{Transport: &redirectTransport{server.URL}}
+		mutate(conv)
+		if _, _, _, _, _, _, err := conv.Send("hi", sampling); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		return got
+	}
+
+	t.Run("default settings send the default desired output", func(t *testing.T) {
+		if got := send(t, func(*Conversation) {}, llmapi.Sampling{}); got != 2048 {
+			t.Errorf("max_tokens = %d, want 2048 (default desired, under the default ceiling)", got)
+		}
+	})
+
+	t.Run("per-call DesiredOutputTokens overrides the settings default", func(t *testing.T) {
+		if got := send(t, func(*Conversation) {}, llmapi.Sampling{DesiredOutputTokens: 512}); got != 512 {
+			t.Errorf("max_tokens = %d, want 512", got)
+		}
+	})
+
+	t.Run("reasoning headroom clamps to the default ceiling", func(t *testing.T) {
+		got := send(t, func(*Conversation) {}, llmapi.Sampling{ReasoningEffort: llmapi.ReasoningHigh, DesiredOutputTokens: 512})
+		if got != 2048 {
+			t.Errorf("max_tokens = %d, want 2048 (512 + 16384 headroom clamped to NovelAI's cap)", got)
+		}
+	})
+
+	t.Run("a raised ceiling admits the headroom", func(t *testing.T) {
+		got := send(t, func(c *Conversation) { c.Settings.OutputCeiling = 32768 },
+			llmapi.Sampling{ReasoningEffort: llmapi.ReasoningLow, DesiredOutputTokens: 512})
+		if got != 4608 {
+			t.Errorf("max_tokens = %d, want 4608 (512 desired + 4096 low headroom)", got)
+		}
+	})
+
+	t.Run("no desired output leaves the field omitted even with effort", func(t *testing.T) {
+		got := send(t, func(c *Conversation) { c.Settings.MaxTokens = 0 },
+			llmapi.Sampling{ReasoningEffort: llmapi.ReasoningHigh})
+		if got != 0 {
+			t.Errorf("max_tokens = %d, want 0/omitted (caller set no output bound)", got)
+		}
+	})
+
+	t.Run("SendStreaming computes the same wire budget", func(t *testing.T) {
+		var got int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req completionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			got = req.MaxTokens
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			chunk := `{"id":"cmpl-1","object":"text_completion","model":"glm-4-6","choices":[{"index":0,"text":"ok","finish_reason":"stop"}]}`
+			w.Write([]byte("data: " + chunk + "\n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
+			flusher.Flush()
+		}))
+		defer server.Close()
+
+		conv := NewConversation("sys")
+		conv.ApiToken = "test-token"
+		conv.HttpClient = &http.Client{Transport: &redirectTransport{server.URL}}
+		if _, _, _, _, _, _, err := conv.SendStreaming("hi", llmapi.Sampling{DesiredOutputTokens: 512}, nil); err != nil {
+			t.Fatalf("SendStreaming: %v", err)
+		}
+		if got != 512 {
+			t.Errorf("max_tokens = %d, want 512 (per-call desired through the streaming path)", got)
+		}
+	})
+}
+
 func TestNormalizeStopReason(t *testing.T) {
 	tests := []struct {
 		input    string

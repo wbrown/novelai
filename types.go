@@ -42,8 +42,18 @@ var (
 type Settings struct {
 	// Model to use for generation (e.g., "glm-4-6", "llama-3-erato-v1")
 	Model string
-	// MaxTokens is the maximum number of tokens to generate.
+	// MaxTokens is the default DESIRED OUTPUT for calls that don't specify
+	// llmapi.Sampling.DesiredOutputTokens — how much real content a call
+	// wants, not the wire cap. The wire max_tokens is computed per call by
+	// resolveCompletionBudget: desired plus the requested effort's reasoning
+	// headroom (think-format reasoning streams inside the same completion
+	// budget as the answer), clamped to OutputCeiling.
 	MaxTokens int
+	// OutputCeiling is NovelAI's per-request output limit — the most
+	// completion tokens a single request will actually serve. DefaultSettings
+	// carries 2048, the typical NovelAI cap; override it per deployment, or
+	// set 0 for no clamp.
+	OutputCeiling int
 	// Temperature controls randomness. Range: 0.0 to 2.0.
 	Temperature float64
 	// TopP is nucleus sampling parameter.
@@ -70,6 +80,7 @@ type Settings struct {
 var DefaultSettings = Settings{
 	Model:         "glm-4-6",
 	MaxTokens:     2048,
+	OutputCeiling: 2048,
 	Temperature:   1.0,
 	TopP:          0.9,
 	StopSequences: []string{"<|user|>", "<|system|>"},

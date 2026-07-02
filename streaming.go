@@ -64,7 +64,7 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 	req := completionRequest{
 		Model:             c.Settings.Model,
 		Prompt:            prompt,
-		MaxTokens:         c.Settings.MaxTokens,
+		MaxTokens:         resolveCompletionBudget(c.Settings, sampling),
 		Temperature:       temperature,
 		TopP:              topP,
 		TopK:              topK,

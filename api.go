@@ -84,6 +84,48 @@ func NewConversation(system string) *Conversation {
 	}
 }
 
+// reasoningHeadroom is the per-effort reasoning reserve added to the desired
+// output when computing the wire max_tokens: think-format reasoning (the
+// <think> block buildPrompt elicits) streams inside the same completion budget
+// as the answer, so without a reserve the thinking eats the content budget and
+// the answer truncates. The values match the tiers Anthropic documents for its
+// own shared-pool adaptive thinking (the top tiers carry its documented 64K
+// floor); under NovelAI's default 2048 ceiling they clamp away, and they only
+// take effect when the caller raises OutputCeiling for a bigger deployment.
+var reasoningHeadroom = map[llmapi.ReasoningEffort]int{
+	llmapi.ReasoningLow:    4096,
+	llmapi.ReasoningMedium: 8192,
+	llmapi.ReasoningHigh:   16384,
+	llmapi.ReasoningXHigh:  65536,
+	llmapi.ReasoningMax:    65536,
+}
+
+// resolveCompletionBudget computes the wire max_tokens: the desired output
+// (per-call Sampling.DesiredOutputTokens, else Settings.MaxTokens as the
+// default desired output) plus the requested effort tier's reasoning headroom,
+// clamped to Settings.OutputCeiling — NovelAI's per-request output limit
+// (DefaultSettings carries 2048, the typical cap; 0 = no clamp). A desired
+// output of 0 (both the per-call value and the settings default unset) returns
+// 0 so the field stays omitted and the server's own default governs: headroom
+// is never added to a bound the caller declined to set.
+func resolveCompletionBudget(s Settings, sampling llmapi.Sampling) int {
+	desired := sampling.DesiredOutputTokens
+	if desired == 0 {
+		desired = s.MaxTokens
+	}
+	if desired == 0 {
+		return 0
+	}
+	wire := desired
+	if sampling.ReasoningEffort != llmapi.ReasoningOff {
+		wire += reasoningHeadroom[sampling.ReasoningEffort]
+	}
+	if s.OutputCeiling > 0 && wire > s.OutputCeiling {
+		wire = s.OutputCeiling
+	}
+	return wire
+}
+
 // Send sends a user message and returns the assistant's reply.
 // If text is empty, continues from the last assistant message (for max_tokens continuation).
 //
@@ -138,7 +180,7 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	req := completionRequest{
 		Model:             c.Settings.Model,
 		Prompt:            prompt,
-		MaxTokens:         c.Settings.MaxTokens,
+		MaxTokens:         resolveCompletionBudget(c.Settings, sampling),
 		Temperature:       temperature,
 		TopP:              topP,
 		TopK:              topK,
