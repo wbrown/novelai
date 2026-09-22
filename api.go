@@ -126,6 +126,168 @@ func resolveCompletionBudget(s Settings, sampling llmapi.Sampling) int {
 	return wire
 }
 
+// requestAccount is everything one request produced: what the provider sent
+// (the max_tokens the request carried) and what the server reported (the
+// reply, its finish reason verbatim, and the prompt and completion token
+// counts). Send, SendRich, SendStreaming and SendRichStreaming all project
+// from it.
+type requestAccount struct {
+	text string
+	// finishReason is the server's finish_reason as sent; "" when the server
+	// reported none.
+	finishReason     string
+	promptTokens     int
+	completionTokens int
+	// budget is the max_tokens the request carried; 0 when the request
+	// carried none.
+	budget int
+}
+
+// tuple projects the account onto the seven-value Conversation methods: the
+// reply, the normalized stop, and the four token counts. The two cache counts
+// are always 0; NovelAI reports no cache statistics.
+func (a requestAccount) tuple() (reply, stopReason string, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) {
+	return a.text, normalizeStopReason(a.finishReason), a.promptTokens, a.completionTokens, 0, 0
+}
+
+// richResponse renders the account as the llmapi response: the reply as one
+// text block, with the account beside it. NovelAI reports no cache statistics
+// and attributes no output tokens by channel, so the cache counts stay 0 and
+// the split stays unknown.
+func (a requestAccount) richResponse() *llmapi.RichResponse {
+	return &llmapi.RichResponse{
+		Content:          []llmapi.ContentBlock{llmapi.NewTextBlock(a.text)},
+		StopReason:       normalizeStopReason(a.finishReason),
+		InputTokens:      a.promptTokens,
+		OutputTokens:     a.completionTokens,
+		CompletionBudget: a.budget,
+		FinishReason:     a.finishReason,
+	}
+}
+
+// buildRequest assembles the completions request for the conversation as it
+// stands: the prompt buildPrompt renders for the requested effort, the wire
+// max_tokens resolveCompletionBudget derives, the sampling parameters with
+// per-call overrides layered over the conversation's defaults, and the
+// penalties and stop sequences from Settings. stream marks a streaming
+// request and asks for the trailing usage chunk. Both send paths build their
+// request here, so the wire shape is one shape.
+func (c *Conversation) buildRequest(sampling llmapi.Sampling, stream bool) completionRequest {
+	temperature := c.Settings.Temperature
+	if sampling.Temperature != 0 {
+		temperature = sampling.Temperature
+	}
+	topP := c.Settings.TopP
+	if sampling.TopP != 0 {
+		topP = sampling.TopP
+	}
+	topK := c.Settings.TopK
+	if sampling.TopK != 0 {
+		topK = sampling.TopK
+	}
+
+	req := completionRequest{
+		Model:             c.Settings.Model,
+		Prompt:            c.buildPrompt(sampling.ReasoningEffort),
+		MaxTokens:         resolveCompletionBudget(c.Settings, sampling),
+		Temperature:       temperature,
+		TopP:              topP,
+		TopK:              topK,
+		MinP:              c.Settings.MinP,
+		FrequencyPenalty:  c.Settings.FrequencyPenalty,
+		PresencePenalty:   c.Settings.PresencePenalty,
+		RepetitionPenalty: c.Settings.RepetitionPenalty,
+		Stop:              c.Settings.StopSequences,
+	}
+	if stream {
+		req.Stream = true
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+	return req
+}
+
+// exchange adds the user text (when non-empty), sends the conversation as one
+// non-streaming request, appends the assistant reply to history, accumulates
+// usage, and returns the request's account. With empty text it sends the
+// conversation as it stands: a trailing user turn is answered and a trailing
+// assistant turn is continued. A response that does not parse is returned as
+// the account's text beside the error.
+func (c *Conversation) exchange(text string, sampling llmapi.Sampling) (requestAccount, error) {
+	if c.ApiToken == "" {
+		return requestAccount{}, fmt.Errorf("API token not set")
+	}
+	if text != "" {
+		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
+	} else if len(c.Messages) == 0 {
+		return requestAccount{}, fmt.Errorf("cannot generate: no messages in conversation")
+	}
+
+	req := c.buildRequest(sampling, false)
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return requestAccount{}, fmt.Errorf("error marshaling request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return requestAccount{}, fmt.Errorf("error creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
+
+	// Perform request with retries
+	var resp *http.Response
+	for attempt := 0; attempt <= retries; attempt++ {
+		resp, err = c.HttpClient.Do(httpReq)
+		if err == nil {
+			break
+		}
+		if attempt < retries {
+			time.Sleep(retryDelay)
+			// Recreate request body for retry
+			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
+		}
+	}
+	if err != nil {
+		return requestAccount{}, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
+	}
+	if resp == nil {
+		return requestAccount{}, fmt.Errorf("HTTP response is nil")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return requestAccount{}, fmt.Errorf("error reading response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return requestAccount{}, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+	}
+
+	var compResp completionResponse
+	if err := json.Unmarshal(body, &compResp); err != nil {
+		return requestAccount{text: string(body)}, fmt.Errorf("error parsing response: %w", err)
+	}
+	if len(compResp.Choices) == 0 {
+		return requestAccount{}, fmt.Errorf("no choices in response")
+	}
+
+	choice := compResp.Choices[0]
+	c.Messages = append(c.Messages, Message{Role: "assistant", Content: choice.Text})
+	c.Usage.InputTokens += compResp.Usage.PromptTokens
+	c.Usage.OutputTokens += compResp.Usage.CompletionTokens
+
+	return requestAccount{
+		text:             choice.Text,
+		finishReason:     choice.FinishReason,
+		promptTokens:     compResp.Usage.PromptTokens,
+		completionTokens: compResp.Usage.CompletionTokens,
+		budget:           req.MaxTokens,
+	}, nil
+}
+
 // Send sends a user message and returns the assistant's reply.
 // If text is empty, continues from the last assistant message (for max_tokens continuation).
 //
@@ -146,125 +308,9 @@ func (c *Conversation) Send(text string, sampling llmapi.Sampling) (
 	cacheReadTokens int,
 	err error,
 ) {
-	if c.ApiToken == "" {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("API token not set")
-	}
-
-	// Add user message if provided
-	if text != "" {
-		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
-	} else if len(c.Messages) == 0 {
-		// Can't generate with no messages
-		return "", "", 0, 0, 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
-	}
-	// Note: If text is empty and last message is "user", we generate a response to it.
-	// If text is empty and last message is "assistant", we continue from that message.
-
-	// Build prompt string from system + conversation history
-	prompt := c.buildPrompt(sampling.ReasoningEffort)
-
-	// Use sampling overrides if provided, otherwise use conversation defaults
-	temperature := c.Settings.Temperature
-	if sampling.Temperature != 0 {
-		temperature = sampling.Temperature
-	}
-	topP := c.Settings.TopP
-	if sampling.TopP != 0 {
-		topP = sampling.TopP
-	}
-	topK := c.Settings.TopK
-	if sampling.TopK != 0 {
-		topK = sampling.TopK
-	}
-
-	req := completionRequest{
-		Model:             c.Settings.Model,
-		Prompt:            prompt,
-		MaxTokens:         resolveCompletionBudget(c.Settings, sampling),
-		Temperature:       temperature,
-		TopP:              topP,
-		TopK:              topK,
-		MinP:              c.Settings.MinP,
-		FrequencyPenalty:  c.Settings.FrequencyPenalty,
-		PresencePenalty:   c.Settings.PresencePenalty,
-		RepetitionPenalty: c.Settings.RepetitionPenalty,
-		Stop:              c.Settings.StopSequences,
-	}
-
-	// Marshal request to JSON
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("error marshaling request: %w", err)
-	}
-
-	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("error creating request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
-
-	// Perform request with retries
-	var resp *http.Response
-	for attempt := 0; attempt <= retries; attempt++ {
-		resp, err = c.HttpClient.Do(httpReq)
-		if err == nil {
-			break
-		}
-		if attempt < retries {
-			time.Sleep(retryDelay)
-			// Recreate request body for retry
-			httpReq, _ = http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
-			httpReq.Header.Set("Content-Type", "application/json")
-			httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
-		}
-	}
-	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
-	}
-	if resp == nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP response is nil")
-	}
-	defer resp.Body.Close()
-
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("error reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
-	}
-
-	// Parse response
-	var compResp completionResponse
-	if err := json.Unmarshal(body, &compResp); err != nil {
-		return string(body), "", 0, 0, 0, 0, fmt.Errorf("error parsing response: %w", err)
-	}
-
-	if len(compResp.Choices) == 0 {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("no choices in response")
-	}
-
-	choice := compResp.Choices[0]
-	reply = choice.Text
-
-	// Add assistant message to history
-	c.Messages = append(c.Messages, Message{Role: "assistant", Content: reply})
-
-	// Normalize stop reason from OpenAI format to common format
-	stopReason = normalizeStopReason(choice.FinishReason)
-
-	// Update usage
-	inputTokens = compResp.Usage.PromptTokens
-	outputTokens = compResp.Usage.CompletionTokens
-	c.Usage.InputTokens += inputTokens
-	c.Usage.OutputTokens += outputTokens
-
-	return reply, stopReason, inputTokens, outputTokens, 0, 0, nil
+	acct, err := c.exchange(text, sampling)
+	reply, stopReason, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = acct.tuple()
+	return reply, stopReason, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, err
 }
 
 // buildPrompt constructs a prompt string from the system prompt and conversation history.
@@ -530,54 +576,27 @@ func readTokenFile(path string) string {
 
 // SendRich sends a message with rich content blocks and returns a full response.
 // NovelAI doesn't support rich content natively, so this extracts text from
-// content blocks and delegates to Send.
+// content blocks and sends it as one request, whose account the response
+// carries.
 //
 // If content is nil or empty, continues from the last message.
 func (c *Conversation) SendRich(content []llmapi.ContentBlock, sampling llmapi.Sampling) (*llmapi.RichResponse, error) {
-	// Extract text from content blocks
-	text := extractTextFromBlocks(content)
-
-	reply, stopReason, inputTokens, outputTokens, _, _, err := c.Send(text, sampling)
+	acct, err := c.exchange(extractTextFromBlocks(content), sampling)
 	if err != nil {
 		return nil, err
 	}
-
-	return &llmapi.RichResponse{
-		Content: []llmapi.ContentBlock{
-			llmapi.NewTextBlock(reply),
-		},
-		StopReason:   stopReason,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		// NovelAI doesn't report cache stats
-		CacheCreationInputTokens: 0,
-		CacheReadInputTokens:     0,
-	}, nil
+	return acct.richResponse(), nil
 }
 
 // SendRichStreaming sends rich content with streaming.
 // NovelAI doesn't support rich content natively, so this extracts text and
-// delegates to SendStreaming.
+// streams it as one request, whose account the response carries.
 func (c *Conversation) SendRichStreaming(content []llmapi.ContentBlock, sampling llmapi.Sampling, callback llmapi.StreamCallback) (*llmapi.RichResponse, error) {
-	// Extract text from content blocks
-	text := extractTextFromBlocks(content)
-
-	reply, stopReason, inputTokens, outputTokens, _, _, err := c.SendStreaming(text, sampling, callback)
+	acct, err := c.streamExchange(extractTextFromBlocks(content), sampling, callback)
 	if err != nil {
 		return nil, err
 	}
-
-	return &llmapi.RichResponse{
-		Content: []llmapi.ContentBlock{
-			llmapi.NewTextBlock(reply),
-		},
-		StopReason:   stopReason,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		// NovelAI doesn't report cache stats
-		CacheCreationInputTokens: 0,
-		CacheReadInputTokens:     0,
-	}, nil
+	return acct.richResponse(), nil
 }
 
 // AddRichMessage adds a message with multiple content blocks to the history.
