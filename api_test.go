@@ -1096,3 +1096,107 @@ func TestStreamingWithUsageData(t *testing.T) {
 		t.Errorf("Expected 3 token callbacks, got %d", len(tokens))
 	}
 }
+
+// TestSendRich_AccountsForTheRequest drives the non-streaming rich path
+// against a mock completions server and asserts the account the response
+// carries: the max_tokens the request put on the wire, the server's own
+// finish reason beside the normalized stop, and an unknown split, since the
+// completions usage block attributes no channel.
+func TestSendRich_AccountsForTheRequest(t *testing.T) {
+	var wire int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req completionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		wire = req.MaxTokens
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(mockCompletionResponse(" ok", "length", 10, 8)); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	conv := NewConversation("sys")
+	conv.ApiToken = "test-token"
+	conv.SetEndpoint(server.URL)
+
+	rr, err := conv.SendRich([]llmapi.ContentBlock{llmapi.NewTextBlock("hi")}, llmapi.Sampling{DesiredOutputTokens: 512})
+	if err != nil {
+		t.Fatalf("SendRich: %v", err)
+	}
+	if rr.CompletionBudget != 512 || wire != rr.CompletionBudget {
+		t.Errorf("CompletionBudget = %d, wire max_tokens = %d; want both 512", rr.CompletionBudget, wire)
+	}
+	if rr.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want %q (the server's own word)", rr.FinishReason, "length")
+	}
+	if rr.StopReason != "max_tokens" {
+		t.Errorf("StopReason = %q, want %q", rr.StopReason, "max_tokens")
+	}
+	if rr.Text() != " ok" {
+		t.Errorf("Text() = %q, want %q", rr.Text(), " ok")
+	}
+	if rr.InputTokens != 10 || rr.OutputTokens != 8 {
+		t.Errorf("tokens in=%d out=%d, want in=10 out=8", rr.InputTokens, rr.OutputTokens)
+	}
+	if rr.OutputSplit.Known {
+		t.Errorf("OutputSplit = %+v, want unknown: the usage block attributes no channel", rr.OutputSplit)
+	}
+}
+
+// TestSendRichStreaming_AccountsForTheRequest drives the streaming rich path
+// against a mock SSE server, with the ceiling raised so the low-effort
+// headroom is admitted into the wire budget, and asserts the same account.
+func TestSendRichStreaming_AccountsForTheRequest(t *testing.T) {
+	var wire int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req completionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		wire = req.MaxTokens
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"cmpl-1","object":"text_completion","model":"glm-4-6","choices":[{"index":0,"text":"ok","finish_reason":null}]}`,
+			`{"id":"cmpl-1","object":"text_completion","model":"glm-4-6","choices":[{"index":0,"text":"","finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}`,
+		}
+		for _, chunk := range chunks {
+			if _, err := w.Write([]byte("data: " + chunk + "\n\n")); err != nil {
+				t.Errorf("write chunk: %v", err)
+			}
+		}
+		if _, err := w.Write([]byte("data: [DONE]\n\n")); err != nil {
+			t.Errorf("write done: %v", err)
+		}
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	conv := NewConversation("sys")
+	conv.ApiToken = "test-token"
+	conv.SetEndpoint(server.URL)
+	conv.Settings.OutputCeiling = 32768
+
+	rr, err := conv.SendRichStreaming([]llmapi.ContentBlock{llmapi.NewTextBlock("hi")},
+		llmapi.Sampling{ReasoningEffort: llmapi.ReasoningLow, DesiredOutputTokens: 512}, nil)
+	if err != nil {
+		t.Fatalf("SendRichStreaming: %v", err)
+	}
+	if rr.CompletionBudget != 4608 || wire != rr.CompletionBudget {
+		t.Errorf("CompletionBudget = %d, wire max_tokens = %d; want both 4608 (512 desired + 4096 low headroom)", rr.CompletionBudget, wire)
+	}
+	if rr.FinishReason != "stop" || rr.StopReason != "end_turn" {
+		t.Errorf("FinishReason = %q, StopReason = %q; want %q and %q", rr.FinishReason, rr.StopReason, "stop", "end_turn")
+	}
+	if rr.Text() != "ok" {
+		t.Errorf("Text() = %q, want %q", rr.Text(), "ok")
+	}
+	if rr.InputTokens != 7 || rr.OutputTokens != 1 {
+		t.Errorf("tokens in=%d out=%d, want in=7 out=1 (the usage chunk)", rr.InputTokens, rr.OutputTokens)
+	}
+	if rr.OutputSplit.Known {
+		t.Errorf("OutputSplit = %+v, want unknown: the usage chunk attributes no channel", rr.OutputSplit)
+	}
+}

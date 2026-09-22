@@ -22,6 +22,8 @@ type StreamCallback = llmapi.StreamCallback
 //
 // Returns the same values as Send, but the callback receives tokens as they arrive.
 // cacheCreationTokens and cacheReadTokens are always 0 (NovelAI doesn't report cache stats).
+// On a mid-stream read error the returned values carry what arrived before
+// it, beside the error.
 func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, callback llmapi.StreamCallback) (
 	reply string,
 	stopReason string,
@@ -31,62 +33,36 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 	cacheReadTokens int,
 	err error,
 ) {
-	if c.ApiToken == "" {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("API token not set")
-	}
+	acct, err := c.streamExchange(text, sampling, callback)
+	reply, stopReason, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = acct.tuple()
+	return reply, stopReason, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, err
+}
 
-	// Add user message if provided
+// streamExchange is the streaming twin of exchange: it adds the user text
+// (when non-empty), sends the conversation as one SSE request, appends the
+// assistant reply to history, accumulates usage, and returns the request's
+// account. On a mid-stream read error the account carries what arrived before
+// it, beside the error, and history and usage are left untouched.
+func (c *Conversation) streamExchange(text string, sampling llmapi.Sampling, callback llmapi.StreamCallback) (requestAccount, error) {
+	if c.ApiToken == "" {
+		return requestAccount{}, fmt.Errorf("API token not set")
+	}
 	if text != "" {
 		c.Messages = append(c.Messages, Message{Role: "user", Content: text})
 	} else if len(c.Messages) == 0 {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("cannot generate: no messages in conversation")
-	}
-	// Note: If text is empty and last message is "user", we generate a response to it.
-	// If text is empty and last message is "assistant", we continue from that message.
-
-	// Build prompt string from system + conversation history
-	prompt := c.buildPrompt(sampling.ReasoningEffort)
-
-	// Use sampling overrides if provided, otherwise use conversation defaults
-	temperature := c.Settings.Temperature
-	if sampling.Temperature != 0 {
-		temperature = sampling.Temperature
-	}
-	topP := c.Settings.TopP
-	if sampling.TopP != 0 {
-		topP = sampling.TopP
-	}
-	topK := c.Settings.TopK
-	if sampling.TopK != 0 {
-		topK = sampling.TopK
+		return requestAccount{}, fmt.Errorf("cannot generate: no messages in conversation")
 	}
 
-	req := completionRequest{
-		Model:             c.Settings.Model,
-		Prompt:            prompt,
-		MaxTokens:         resolveCompletionBudget(c.Settings, sampling),
-		Temperature:       temperature,
-		TopP:              topP,
-		TopK:              topK,
-		MinP:              c.Settings.MinP,
-		FrequencyPenalty:  c.Settings.FrequencyPenalty,
-		PresencePenalty:   c.Settings.PresencePenalty,
-		RepetitionPenalty: c.Settings.RepetitionPenalty,
-		Stop:              c.Settings.StopSequences,
-		Stream:            true,
-		StreamOptions:     &streamOptions{IncludeUsage: true},
-	}
-
+	req := c.buildRequest(sampling, true)
 	jsonData, err := json.Marshal(req)
 	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("error marshaling request: %w", err)
+		return requestAccount{}, fmt.Errorf("error marshaling request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(c.context(), "POST", c.endpoint(), bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("error creating request: %w", err)
+		return requestAccount{}, fmt.Errorf("error creating request: %w", err)
 	}
-
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.ApiToken)
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -113,35 +89,34 @@ func (c *Conversation) SendStreaming(text string, sampling llmapi.Sampling, call
 		}
 	}
 	if err != nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
+		return requestAccount{}, fmt.Errorf("HTTP error after %d retries: %w", retries, err)
 	}
 	if resp == nil {
-		return "", "", 0, 0, 0, 0, fmt.Errorf("HTTP response is nil")
+		return requestAccount{}, fmt.Errorf("HTTP response is nil")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", "", 0, 0, 0, 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+		return requestAccount{}, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
 	}
 
-	// Parse SSE stream
-	reply, stopReason, inputTokens, outputTokens, err = c.parseSSEStream(resp.Body, callback)
+	reply, finishReason, inputTokens, outputTokens, err := c.parseSSEStream(resp.Body, callback)
+	acct := requestAccount{
+		text:             reply,
+		finishReason:     finishReason,
+		promptTokens:     inputTokens,
+		completionTokens: outputTokens,
+		budget:           req.MaxTokens,
+	}
 	if err != nil {
-		return reply, stopReason, 0, 0, 0, 0, err
+		return acct, err
 	}
 
-	// Add assistant message to history
 	c.Messages = append(c.Messages, Message{Role: "assistant", Content: reply})
-
-	// Normalize stop reason
-	stopReason = normalizeStopReason(stopReason)
-
-	// Update cumulative usage
 	c.Usage.InputTokens += inputTokens
 	c.Usage.OutputTokens += outputTokens
-
-	return reply, stopReason, inputTokens, outputTokens, 0, 0, nil
+	return acct, nil
 }
 
 // parseSSEStream reads Server-Sent Events and calls the callback for each token.
